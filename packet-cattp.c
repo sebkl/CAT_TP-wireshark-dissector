@@ -37,6 +37,19 @@
 #endif
 
 #define CATTP_HBLEN 18
+#define F_SYN 0x80
+#define F_ACK 0x40 
+#define F_EAK 0x20
+#define F_RST 0x10
+#define F_NUL 0x08
+#define F_SEG 0x04
+
+/* bit masks for the first header byte. */
+#define M_FLAGS 0xFC 	/* flags only, no version */
+#define M_PDU_SYN 0xB8 	/* SYN (ACK,SEG dont care) without version*/
+#define M_PDU_ACK 0xD0 	/* ACK (EAK,SEG,NUL dont care) without version */
+#define M_PDU_RST 0xBC 	/* RST (ACK dont caret) without version */
+#define M_VERSION 0x03 	/* only Version */
 
 //Function to register the dissector, called by plugin infrastructure.
 void proto_register_cattp();
@@ -80,18 +93,34 @@ typedef struct {
 	gboolean rst;
 	gboolean nul;
 	gboolean seg;
+	guint8 flags;
 	guint8 version;
 	gushort rfu;
 	guint8 hlen;
 	gushort srcport;
 	gushort dstport;
 	gushort dlen;
-	gushort synno;
+	gushort seqno;
 	gushort ackno;
 	gushort wsize;
 	gushort chksum;
-	guint16 p_len;
-	guint8* payload;
+	union {
+		struct { /*SYN,SYNACK*/
+			gushort maxpdu;
+			gushort maxsdu;
+			guint8 idlen;
+			guint8* id;
+		} syn;
+		struct { /* ACK/EAK */
+			guint8 eak_len;
+			gushort* eaks;
+			guint8* data;
+		} ack;
+		struct { /* RST */
+			guint8 rc;
+		} rst;
+	} pdu;
+
 } cattp_pck;
 
 static cattp_pck* parse_cattp_packet(tvbuff_t *tvb) {
@@ -108,20 +137,23 @@ static cattp_pck* parse_cattp_packet(tvbuff_t *tvb) {
 	int offset = 0;
 	guint8 fb = tvb_get_guint8(tvb,offset); offset++;
 
-	ret->syn = (fb & 0x80) > 0;
-	ret->ack = (fb & 0x40) > 0;
-	ret->eak = (fb & 0x20) > 0;
-	ret->rst = (fb & 0x10) > 0;
-	ret->nul = (fb & 0x08) > 0;
-	ret->seg = (fb & 0x04) > 0;
-	ret->version = fb & 0x03;
+	ret->flags = fb & 0xFC; // mask the flags only
+
+	ret->syn = (fb & F_SYN) > 0;
+	ret->ack = (fb & F_ACK) > 0;
+	ret->eak = (fb & F_EAK) > 0;
+	ret->rst = (fb & F_RST) > 0;
+	ret->nul = (fb & F_NUL) > 0;
+	ret->seg = (fb & F_SEG) > 0;
+
+	ret->version = fb & M_VERSION; // mask the version only
 
 	ret->rfu = tvb_get_ntohs(tvb,offset); offset+=2;
 	ret->hlen = tvb_get_guint8(tvb,offset); offset++;
 	ret->srcport = tvb_get_ntohs(tvb,offset); offset+=2;
 	ret->dstport = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->dlen = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->synno = tvb_get_ntohs(tvb,offset); offset+=2;
+	ret->dlen = tvb_get_ntohs(tvb,offset);  offset+=2;
+	ret->seqno = tvb_get_ntohs(tvb,offset); offset+=2;
 	ret->ackno = tvb_get_ntohs(tvb,offset); offset+=2;
 	ret->wsize = tvb_get_ntohs(tvb,offset); offset+=2;
 	ret->chksum = tvb_get_ntohs(tvb,offset); offset+=2;
@@ -130,38 +162,85 @@ static cattp_pck* parse_cattp_packet(tvbuff_t *tvb) {
 	int tl = ret->hlen + ret->dlen;
 	if (tl != len) {
 		/* Invalid header/data len -> abort */
+		LOGF("Invalid header length: %d/%ld\n",tl,len);
 		return NULL;
 	}
-	
-	return ret;
+
+	//Parse SYN (only syn flag set)
+	if ((ret->flags & M_PDU_SYN) == F_SYN) {
+		ret->pdu.syn.maxpdu = tvb_get_ntohs(tvb,offset); offset+=2;
+		ret->pdu.syn.maxsdu = tvb_get_ntohs(tvb,offset); offset+=2;
+		int idlen = ret->pdu.syn.idlen = tvb_get_guint8(tvb,offset); offset++;
+
+		if (idlen != ret->hlen - offset) {
+			LOGF("Invalid SYN Header: hlen:%d idlen:%d offset:%d\n",ret->hlen,idlen,offset);
+			return NULL;
+		}
+
+		guint8* id = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * idlen + 1);
+		int i;
+		for (i = 0;i <idlen;i++) {
+			id[i] = tvb_get_guint8(tvb,offset); offset++;
+			LOGF("%X",id[i]);
+		}
+		id[idlen] = 0;
+		return ret;
+	}
+
+	//Parse ACK PDU
+	if ((ret->flags & M_PDU_ACK) == F_ACK) {
+		if (ret->flags & F_EAK) {
+			int eak_len =ret->pdu.ack.eak_len = (len-CATTP_HBLEN) >> 1;
+			ret->pdu.ack.eaks = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * eak_len +1);
+
+			int i;
+			for (i = 0; i < eak_len;i++) {
+				ret->pdu.ack.eaks[i] = tvb_get_ntohs(tvb,offset); offset+=2;
+			}
+			ret->pdu.ack.eaks[eak_len] = 0;
+		} else {
+			ret->pdu.ack.eak_len = 0;
+			ret->pdu.ack.eaks = NULL;
+		}
+
+		if ((ret->flags & F_NUL) && ret->dlen) {
+			LOGF("NUL packet is not supposed to carry data.\n");
+			return NULL;
+		}
+
+		if (ret->dlen > 0) {
+			guint8* data = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * ret->dlen + 1);
+			int i;
+			for (i = 0; i < ret->dlen;i++) {
+				data[i] = tvb_get_guint8(tvb,offset); offset++;
+			}
+			data[ret->dlen] = 0;
+		}
+		return ret;
+	}
+
+	//Parse RST PDU
+	if ((ret->flags & M_PDU_RST) == F_RST) {
+		ret->pdu.rst.rc = tvb_get_guint8(tvb,offset); offset++;
+		return ret;
+	}
+
+	LOGF("Unknown packet type.\n");
+	return NULL;
 }
 
 static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data) {
-	LOGF("DISSECT_HEUR\n");
-
 	cattp_pck* pck = parse_cattp_packet(tvb);
 
 	if (pck == NULL) {
-		LOGF("Not a cattp packet\n");
 		return FALSE;
 	}
-
-
-	/*
-	10 RST
-	40 ACK
-	80 SYN
-	c0 SYN ACK
-	48 ACK NUL
-	60 ACK EAK
-      */
 
 	dissect_cattp(tvb,pinfo,tree);
 	return TRUE;
 }
 
 static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree){
-	LOGF("DISSECT\n");
 	cattp_pck* pck = parse_cattp_packet(tvb);
 	//LOGF("syn:%d ack:%d eak:%d rst:%d nul:%d seg:%d version:%d hlen:%d",pck->syn,pck->ack,pck->eak,pck->rst,pck->nul,pck->seg,pck->version,pck->hlen);
 
@@ -172,11 +251,11 @@ static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree){
 
 	LOGF("S:%d A:%d E:%d R:%d N:%d SEG:%d version:%d rfu: %X hlen:%d sport:%d dport:%d dlen:%d\n",pck->syn,pck->ack,pck->eak,pck->rst,pck->nul,pck->seg,pck->version,pck->rfu,pck->hlen,pck->srcport, pck->dstport, pck->dlen);
 
-	col_set_str(pinfo->cinfo, COL_PROTOCOL, "cattp");
+	col_set_str(pinfo->cinfo, COL_PROTOCOL, "CAT-TP/UDP");
 
 	/* Clear out stuff in the info column */
 	col_clear(pinfo->cinfo,COL_INFO);
-
+	col_set_str(pinfo->cinfo,COL_INFO,"infoline");
 
 	if (tree) { /* we are being asked for details */
 		proto_item *ti = NULL;
@@ -192,9 +271,6 @@ static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree){
 		col_set_str(pinfo->cinfo, COL_PROTOCOL, "HTTP/OBML");
 	}
 
-	if (check_col(pinfo->cinfo,COL_INFO)) {
-		col_clear(pinfo->cinfo,COL_INFO);
-	}
 
 	guint8* data = (guint8*) g_memdup((*os)->output,(*os)->oSize);
 	
