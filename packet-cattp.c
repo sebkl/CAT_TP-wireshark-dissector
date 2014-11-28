@@ -65,12 +65,60 @@ static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree
 static int proto_cattp = -1;
 static guint gcattp_port = 6004;
 
+
+static gint ett_cattp = -1;
+
+static int hf_cattp_srcport = -1;
+static int hf_cattp_dstport = -1;
+static int hf_cattp_datalen = -1;
+static int hf_cattp_seq = -1;
+static int hf_cattp_ack = -1;
+static int hf_cattp_windowsize = -1;
+static int hf_cattp_checksum = -1;
+static int hf_cattp_identification = -1;
+
 void proto_register_cattp(void) {
 	proto_cattp = proto_register_protocol (
-		"ETSI CAT-TP",	/* name */
-		"CAT-TP etsi",	/* short name */
+		"ETSI Card Application Toolkit Transport Protocol",	/* name */
+		"CAT-TP (ETSI)",/* short name */
 		"cattp"		/* abbrev */
 	);
+
+	static hf_register_info hf[] = {
+		{ &hf_cattp_srcport,
+		{ "Source Port","cattp.srcport", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_dstport,
+		{ "Destination Port","cattp.dstport", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_datalen,
+		{ "Data Length","cattp.datalen", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_seq,
+		{ "Sequence Number","cattp.seq", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_ack,
+		{ "Acknowledgement Number","cattp.ack", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_windowsize,
+		{ "Window Size","cattp.windowsize", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_checksum,
+		{ "Checksum","cattp.checksum", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_checksum,
+		{ "Identification","cattp.identification", FT_UINT_BYTES, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+	};
+
+	/* Setup protocol subtree array */
+	static gint *ett[] = {
+		&ett_cattp
+	};
+
+	proto_register_field_array(proto_cattp, hf, array_length(hf));
+	proto_register_subtree_array(ett, array_length(ett));
+
 	LOGF("Registered cattp dissector: %d\n",proto_cattp);
 }
 
@@ -258,8 +306,35 @@ static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree){
 	col_set_str(pinfo->cinfo,COL_INFO,"infoline");
 
 	if (tree) { /* we are being asked for details */
-		proto_item *ti = NULL;
-		ti = proto_tree_add_item(tree, proto_cattp, tvb, 0, -1, ENC_NA);
+		proto_item *ti = proto_tree_add_protocol_format(tree, proto_cattp, tvb, 0, pck->hlen,
+                                                "Card Application Toolkit Transport Protocol v%u, Src Port: %u, Dst Port: %u)",
+                                                pck->version,pck->srcport, pck->dstport);
+
+		proto_item *cattp_tree = proto_item_add_subtree(ti, ett_cattp);
+
+		guint32 offset = 4;
+
+		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_srcport, tvb, offset, 2, pck->srcport,"%u", pck->srcport);
+		offset+=2;
+
+		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_dstport, tvb, offset, 2, pck->dstport,"%u", pck->dstport);
+		offset+=2;
+
+		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_datalen, tvb, offset, 2, pck->dlen,"%u", pck->dlen);
+		offset+=2;
+
+		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_seq, tvb, offset, 2, pck->seqno,"%u", pck->seqno);
+		offset+=2;
+
+		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_ack, tvb, offset, 2, pck->ackno,"%u", pck->ackno);
+		offset+=2;
+
+		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_windowsize, tvb, offset, 2, pck->wsize,"%u", pck->wsize);
+		offset+=2;
+
+		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"%X", pck->chksum);
+		offset+=2;
+		//ti = proto_tree_add_item(tree, proto_cattp, tvb, 0, -1, ENC_NA);
 	}
 
 	/* tcp reassembling is done by HTTP dissector. */
