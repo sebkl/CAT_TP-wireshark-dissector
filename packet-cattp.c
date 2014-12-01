@@ -51,6 +51,11 @@
 #define M_PDU_RST 0xBC 	/* RST (ACK dont caret) without version */
 #define M_VERSION 0x03 	/* only Version */
 
+#define ICCID_LEN 10
+#define ICCID_PREFIX 0x98
+
+#define CATTP_ID_BUFFER_SIZE 1024
+
 //Function to register the dissector, called by plugin infrastructure.
 void proto_register_cattp();
 
@@ -65,7 +70,6 @@ static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree
 static int proto_cattp = -1;
 static guint gcattp_port = 6004;
 
-
 static gint ett_cattp = -1;
 
 static int hf_cattp_srcport = -1;
@@ -76,6 +80,10 @@ static int hf_cattp_ack = -1;
 static int hf_cattp_windowsize = -1;
 static int hf_cattp_checksum = -1;
 static int hf_cattp_identification = -1;
+static int hf_cattp_idlen = -1;
+static int hf_cattp_maxpdu = -1;
+static int hf_cattp_maxsdu = -1;
+static int hf_cattp_rc = -1;
 
 void proto_register_cattp(void) {
 	proto_cattp = proto_register_protocol (
@@ -106,8 +114,20 @@ void proto_register_cattp(void) {
 		{ &hf_cattp_checksum,
 		{ "Checksum","cattp.checksum", FT_UINT16, BASE_DEC, NULL, 0x0,
 		    NULL, HFILL }},
-		{ &hf_cattp_checksum,
-		{ "Identification","cattp.identification", FT_UINT_BYTES, BASE_DEC, NULL, 0x0,
+		{ &hf_cattp_identification,
+		{ "Identification","cattp.identification", FT_BYTES, BASE_NONE, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_maxpdu,
+		{ "Maxpdu","cattp.maxpdu", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_maxsdu,
+		{ "Maxsdu","cattp.maxsdu", FT_UINT16, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_rc,
+		{ "Reason Code","cattp.rc", FT_UINT8, BASE_DEC, NULL, 0x0,
+		    NULL, HFILL }},
+		{ &hf_cattp_idlen,
+		{ "Identification length","cattp.idlen", FT_UINT8, BASE_DEC, NULL, 0x0,
 		    NULL, HFILL }},
 	};
 
@@ -232,6 +252,7 @@ static cattp_pck* parse_cattp_packet(tvbuff_t *tvb) {
 			LOGF("%X",id[i]);
 		}
 		id[idlen] = 0;
+		ret->pdu.syn.id = id;
 		return ret;
 	}
 
@@ -334,29 +355,49 @@ static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree){
 
 		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"%X", pck->chksum);
 		offset+=2;
+
+		if (pck->syn) {
+			proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, pck->pdu.syn.maxpdu,"%u", pck->pdu.syn.maxpdu);
+			offset+=2;
+
+			proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxsdu, tvb, offset, 2, pck->pdu.syn.maxsdu,"%u", pck->pdu.syn.maxsdu);
+			offset+=2;
+
+			proto_tree_add_uint_format_value(cattp_tree, hf_cattp_idlen, tvb, offset, 1, pck->pdu.syn.idlen,"%u", pck->pdu.syn.idlen);
+			offset++;
+
+			if (pck->pdu.syn.idlen > 0) {
+				char buf[CATTP_ID_BUFFER_SIZE];
+				int i;
+				for (i = 0;i < pck->pdu.syn.idlen;i++) {
+					snprintf(&(buf[2*i]),CATTP_ID_BUFFER_SIZE,"%02X",pck->pdu.syn.id[i]);
+				}
+
+
+				if (pck->pdu.syn.idlen == ICCID_LEN && ICCID_PREFIX == pck->pdu.syn.id[0]) {
+					/* switch nibbles for ICCID representation */
+					for (i = 0;i < (ICCID_LEN * 2);i+=2) {
+						char tmp = buf[i];
+						buf[i] = buf[i+1];
+						buf[i+1] = tmp;
+					}
+					proto_tree_add_bytes_format_value(cattp_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s (ICCID)", &buf);
+					offset+=pck->pdu.syn.idlen;
+				} else {
+					proto_tree_add_bytes_format_value(cattp_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s", &buf);
+					offset+=pck->pdu.syn.idlen;
+				}
+			}
+		} else if (pck->eak) {
+			/* LIST all acks */
+		} else if (pck->rst) {
+			proto_tree_add_uint_format_value(cattp_tree, hf_cattp_rc, tvb, offset, 1, pck->pdu.rst.rc,"%u", pck->pdu.rst.rc);
+			offset++;
+		} else {
+
+		}
 		//ti = proto_tree_add_item(tree, proto_cattp, tvb, 0, -1, ENC_NA);
 	}
 
-	/* tcp reassembling is done by HTTP dissector. */
-	//static tvbuff_t	*next_tvb = NULL;
-
-	/*
-
-	if (check_col(pinfo->cinfo, COL_PROTOCOL)) {
-		col_set_str(pinfo->cinfo, COL_PROTOCOL, "HTTP/OBML");
-	}
-
-
-	guint8* data = (guint8*) g_memdup((*os)->output,(*os)->oSize);
-	
-	next_tvb = tvb_new_real_data((guint8*) data,(*os)->oSize,(*os)->oSize);
-	tvb_set_child_real_data_tvbuff(tvb, next_tvb);
-	add_new_data_source(pinfo, next_tvb, "Decoded OBML Data");
-
-	if (tree) {
-		proto_item *ti = NULL;
-		ti = proto_tree_add_item(tree, proto_cattp, next_tvb, 0, (*os)->oSize, TRUE);
-	} 
-	*/
 	wmem_free(wmem_packet_scope(),pck);
 }
