@@ -1,4 +1,4 @@
-/* packet-cattp.
+/* packet-cattp.c
  * Routines for packet dissection of
  *      ETSI TS 102 127 v6.13.0  (Release 6 / 2009-0r45)
  * Copyright 2014-2014 by Sebastian Kloeppel <sebastian@kloeppel.mobi>
@@ -31,7 +31,7 @@
 
 #define CATTP_HBLEN 18
 #define F_SYN 0x80
-#define F_ACK 0x40 
+#define F_ACK 0x40
 #define F_EAK 0x20
 #define F_RST 0x10
 #define F_NUL 0x08
@@ -87,413 +87,533 @@ static int hf_cattp_maxpdu = -1;
 static int hf_cattp_maxsdu = -1;
 static int hf_cattp_rc = -1;
 
-static const char* cattp_reset_reason[] = { 
-	"Normal Ending",
-	"Connection set-up failed, illegal parameters",
-	"Temporarily unable to set up this connection",
-	"Requested Port not available",
-	"Unexpected PDU received",
-	"Maximum retries exceeded",
-	"Version not supported",
-	"RFU"
-};
-
-static const char* cattp_reset_reason_code(guint8 idx) {
-	static guint8 rcs = sizeof(cattp_reset_reason)/sizeof(cattp_reset_reason[0]);
-	if (idx >= rcs) {
-		return cattp_reset_reason[rcs-1];
-	} else {
-		return cattp_reset_reason[idx];
-	}
-}
-
-void proto_register_cattp(void) {
-	proto_cattp = proto_register_protocol (
-		"ETSI Card Application Toolkit Transport Protocol",	/* name */
-		"CAT-TP (ETSI)",/* short name */
-		"cattp"		/* abbrev */
-	);
-
-	static hf_register_info hf[] = {
-		{ &hf_cattp_flags,
-		{ "Flags","cattp.flags", FT_UINT8, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_flag_syn,
-		{ "Synchronize Flag","cattp.flags.syn", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_flag_ack,
-		{ "Acknowledge Flag","cattp.flags.ack", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_flag_eak,
-		{ "Extended Acknowledge Flag","cattp.flags.eak", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_flag_rst,
-		{ "Reset Flag","cattp.flags.rst", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_flag_nul,
-		{ "NULL Flag","cattp.flags.nul", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_flag_seg,
-		{ "Segmentation Flag","cattp.flags.seg", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_version,
-		{ "Version","cattp.version", FT_UINT8, BASE_HEX, NULL, M_VERSION,
-		    NULL, HFILL }},
-		{ &hf_cattp_srcport,
-		{ "Source Port","cattp.srcport", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_dstport,
-		{ "Destination Port","cattp.dstport", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_datalen,
-		{ "Data Length","cattp.datalen", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_seq,
-		{ "Sequence Number","cattp.seq", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_ack,
-		{ "Acknowledgement Number","cattp.ack", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_windowsize,
-		{ "Window Size","cattp.windowsize", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_checksum,
-		{ "Checksum","cattp.checksum", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_identification,
-		{ "Identification","cattp.identification", FT_BYTES, BASE_NONE, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_maxpdu,
-		{ "Maxpdu","cattp.maxpdu", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_maxsdu,
-		{ "Maxsdu","cattp.maxsdu", FT_UINT16, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_rc,
-		{ "Reason Code","cattp.rc", FT_UINT8, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-		{ &hf_cattp_idlen,
-		{ "Identification Length","cattp.idlen", FT_UINT8, BASE_DEC, NULL, 0x0,
-		    NULL, HFILL }},
-	};
-
-	/* Setup protocol subtree array */
-	static gint *ett[] = {
-		&ett_cattp,
-		&ett_cattp_flags,
-		&ett_cattp_id,
-	};
-
-	proto_register_field_array(proto_cattp, hf, array_length(hf));
-	proto_register_subtree_array(ett, array_length(ett));
-}
-
-void proto_reg_handoff_cattp(void) {
-	static dissector_handle_t cattp_handle;
-
-	/* Create dissector handle */
-	cattp_handle = create_dissector_handle(dissect_cattp, proto_cattp);
-
-	dissector_add_uint("udp.port", gcattp_port, cattp_handle);
-	heur_dissector_add("udp",dissect_cattp_heur,proto_cattp);
-}
-
 typedef struct {
-	gboolean syn;
-	gboolean ack;
-	gboolean eak;
-	gboolean rst;
-	gboolean nul;
-	gboolean seg;
-	guint8 flags;
-	guint8 version;
-	gushort rfu;
-	guint8 hlen;
-	gushort srcport;
-	gushort dstport;
-	gushort dlen;
-	gushort seqno;
-	gushort ackno;
-	gushort wsize;
-	gushort chksum;
-	union {
-		struct { /*SYN,SYNACK*/
-			gushort maxpdu;
-			gushort maxsdu;
-			guint8 idlen;
-			guint8* id;
-		} syn;
-		struct { /* ACK/EAK */
-			guint8 eak_len;
-			gushort* eaks;
-			guint8* data;
-		} ack;
-		struct { /* RST */
-			guint8 rc;
-		} rst;
-	} pdu;
-
+    gboolean syn;
+    gboolean ack;
+    gboolean eak;
+    gboolean rst;
+    gboolean nul;
+    gboolean seg;
+    guint8 flags;
+    guint8 version;
+    gushort rfu;
+    guint8 hlen;
+    gushort srcport;
+    gushort dstport;
+    gushort dlen;
+    gushort seqno;
+    gushort ackno;
+    gushort wsize;
+    gushort chksum;
+    union {
+        struct { /*SYN,SYNACK*/
+            gushort maxpdu;
+            gushort maxsdu;
+            guint8 idlen;
+            guint8* id;
+        } syn;
+        struct { /* ACK/EAK */
+            guint8 eak_len;
+            gushort* eaks;
+            guint8* data;
+        } ack;
+        struct { /* RST */
+            guint8 rc;
+        } rst;
+    } pdu;
 } cattp_pck;
 
-static cattp_pck* parse_cattp_packet(tvbuff_t *tvb) {
-	cattp_pck* ret;
-	ret = wmem_alloc(wmem_packet_scope(),sizeof(cattp_pck));
+static const char* cattp_reset_reason[] = {
+    "Normal Ending",
+    "Connection set-up failed, illegal parameters",
+    "Temporarily unable to set up this connection",
+    "Requested Port not available",
+    "Unexpected PDU received",
+    "Maximum retries exceeded",
+    "Version not supported",
+    "RFU"
+};
 
-	/* Ceck if the standard header fits in. */
-	gulong len;
-	len = tvb_captured_length(tvb);
-	if (len < CATTP_HBLEN) {
-		/* this is not a vallid CATTP packet */
-		return NULL;
-	}
-
-	/* Parse the header. */
-	int offset;
-	offset = 0;
-	guint8 fb;
-	fb = tvb_get_guint8(tvb,offset); offset++;
-
-	ret->flags = fb & 0xFC; /* mask the flags only */
-
-	ret->syn = (fb & F_SYN) > 0;
-	ret->ack = (fb & F_ACK) > 0;
-	ret->eak = (fb & F_EAK) > 0;
-	ret->rst = (fb & F_RST) > 0;
-	ret->nul = (fb & F_NUL) > 0;
-	ret->seg = (fb & F_SEG) > 0;
-
-	ret->version = fb & M_VERSION; /* mask the version only */
-
-	ret->rfu = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->hlen = tvb_get_guint8(tvb,offset); offset++;
-	ret->srcport = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->dstport = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->dlen = tvb_get_ntohs(tvb,offset);  offset+=2;
-	ret->seqno = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->ackno = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->wsize = tvb_get_ntohs(tvb,offset); offset+=2;
-	ret->chksum = tvb_get_ntohs(tvb,offset); offset+=2;
-
-	/* Verify the header: */
-	if ((ret->hlen + ret->dlen) != len) {
-		/* Invalid header/data len -> abort */
-		return NULL;
-	}
-
-	/* Parse SYN (only syn flag set) */
-	if ((ret->flags & M_PDU_SYN) == F_SYN) {
-		ret->pdu.syn.maxpdu = tvb_get_ntohs(tvb,offset); offset+=2;
-		ret->pdu.syn.maxsdu = tvb_get_ntohs(tvb,offset); offset+=2;
-
-		int idlen;
-		idlen = ret->pdu.syn.idlen = tvb_get_guint8(tvb,offset); offset++;
-
-		if (idlen != ret->hlen - offset) {
-			return NULL;
-		}
-
-		guint8* id;
-		id = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * idlen + 1);
-
-		int i;
-		for (i = 0;i <idlen;i++) {
-			id[i] = tvb_get_guint8(tvb,offset); offset++;
-		}
-		id[idlen] = 0;
-		ret->pdu.syn.id = id;
-		return ret;
-	}
-
-	/* Parse ACK PDU */
-	if ((ret->flags & M_PDU_ACK) == F_ACK) {
-		if (ret->flags & F_EAK) {
-			int eak_len;
-			eak_len = ret->pdu.ack.eak_len = (len-CATTP_HBLEN) >> 1;
-			ret->pdu.ack.eaks = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * eak_len +1);
-
-			int i;
-			for (i = 0; i < eak_len;i++) {
-				ret->pdu.ack.eaks[i] = tvb_get_ntohs(tvb,offset); offset+=2;
-			}
-			ret->pdu.ack.eaks[eak_len] = 0;
-		} else {
-			ret->pdu.ack.eak_len = 0;
-			ret->pdu.ack.eaks = NULL;
-		}
-
-		if ((ret->flags & F_NUL) && ret->dlen) {
-			return NULL;
-		}
-
-		if (ret->dlen > 0) {
-			guint8* data;
-			data = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * ret->dlen + 1);
-
-			int i;
-			for (i = 0; i < ret->dlen;i++) {
-				data[i] = tvb_get_guint8(tvb,offset); offset++;
-			}
-			data[ret->dlen] = 0;
-		}
-		return ret;
-	}
-
-	/* Parse RST PDU */
-	if ((ret->flags & M_PDU_RST) == F_RST) {
-		ret->pdu.rst.rc = tvb_get_guint8(tvb,offset); offset++;
-		return ret;
-	}
-	return NULL;
+static const char* cattp_reset_reason_code(guint8 idx)
+{
+    static guint8 rcs = sizeof(cattp_reset_reason)/sizeof(cattp_reset_reason[0]);
+    if (idx >= rcs) {
+        return cattp_reset_reason[rcs-1];
+    } else {
+        return cattp_reset_reason[idx];
+    }
 }
 
-static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data) {
-	cattp_pck* pck = parse_cattp_packet(tvb);
+void
+proto_register_cattp(void)
+{
+    proto_cattp = proto_register_protocol (
+                      "ETSI Card Application Toolkit Transport Protocol",	/* name */
+                      "CAT-TP (ETSI)",/* short name */
+                      "cattp"		/* abbrev */
+                  );
 
-	if (pck == NULL) {
-		return FALSE;
-	}
+    static hf_register_info hf[] = {
+        {
+            &hf_cattp_flags,
+            {
+                "Flags","cattp.flags", FT_UINT8, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_flag_syn,
+            {
+                "Synchronize Flag","cattp.flags.syn", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_flag_ack,
+            {
+                "Acknowledge Flag","cattp.flags.ack", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_flag_eak,
+            {
+                "Extended Acknowledge Flag","cattp.flags.eak", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_flag_rst,
+            {
+                "Reset Flag","cattp.flags.rst", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_flag_nul,
+            {
+                "NULL Flag","cattp.flags.nul", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_flag_seg,
+            {
+                "Segmentation Flag","cattp.flags.seg", FT_BOOLEAN, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_version,
+            {
+                "Version","cattp.version", FT_UINT8, BASE_HEX, NULL, M_VERSION,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_srcport,
+            {
+                "Source Port","cattp.srcport", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_dstport,
+            {
+                "Destination Port","cattp.dstport", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_datalen,
+            {
+                "Data Length","cattp.datalen", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_seq,
+            {
+                "Sequence Number","cattp.seq", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_ack,
+            {
+                "Acknowledgement Number","cattp.ack", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_windowsize,
+            {
+                "Window Size","cattp.windowsize", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_checksum,
+            {
+                "Checksum","cattp.checksum", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_identification,
+            {
+                "Identification","cattp.identification", FT_BYTES, BASE_NONE, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_maxpdu,
+            {
+                "Maxpdu","cattp.maxpdu", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_maxsdu,
+            {
+                "Maxsdu","cattp.maxsdu", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_rc,
+            {
+                "Reason Code","cattp.rc", FT_UINT8, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_idlen,
+            {
+                "Identification Length","cattp.idlen", FT_UINT8, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+    };
 
-	dissect_cattp(tvb,pinfo,tree);
-	return TRUE;
+    /* Setup protocol subtree array */
+    static gint *ett[] = {
+        &ett_cattp,
+        &ett_cattp_flags,
+        &ett_cattp_id,
+    };
+
+    proto_register_field_array(proto_cattp, hf, array_length(hf));
+    proto_register_subtree_array(ett, array_length(ett));
 }
 
-static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree){
-	cattp_pck* pck;
-	pck = parse_cattp_packet(tvb);
+void
+proto_reg_handoff_cattp(void)
+{
+    static dissector_handle_t cattp_handle;
 
-	if (pck == NULL) {
-		return;
-	}
+    /* Create dissector handle */
+    cattp_handle = create_dissector_handle(dissect_cattp, proto_cattp);
 
-	col_set_str(pinfo->cinfo, COL_PROTOCOL, "UDP CAT-TP");
-
-	/* Clear out stuff in the info column */
-	col_clear(pinfo->cinfo,COL_INFO);
-
-	col_add_fstr(pinfo->cinfo,COL_INFO,"%u > %u ",pck->srcport,pck->dstport);
-	if ((pck->flags & M_PDU_SYN) == F_SYN) {
-		col_append_fstr(pinfo->cinfo,COL_INFO,"[SYN PDU] IdLen=%u ",pck->pdu.syn.idlen);
-	} else if ((pck->flags & M_PDU_ACK) == F_ACK) {
-		col_append_fstr(pinfo->cinfo,COL_INFO,"[ACK PDU] ");
-	} else if ((pck->flags & M_PDU_RST) == F_RST) {
-		col_append_fstr(pinfo->cinfo,COL_INFO,"[RST] Reason=\"%s\" ",cattp_reset_reason_code(pck->pdu.rst.rc));
-	}
-
-	col_append_fstr(pinfo->cinfo,COL_INFO,"Flags=0x%02X DataLen=%u Ack=%u Seq=%u WSize=%u",pck->flags,pck->dlen,pck->ackno, pck->seqno, pck->wsize);
-
-	if (tree) { /* we are being asked for details */
-		proto_item *ti;
-		ti = proto_tree_add_protocol_format(tree, proto_cattp, tvb, 0, pck->hlen,
-                                                "Card Application Toolkit Transport Protocol v%u, Src Port: %u, Dst Port: %u)",
-                                                pck->version,pck->srcport, pck->dstport);
-
-		proto_item *cattp_tree;
-		cattp_tree = proto_item_add_subtree(ti, ett_cattp);
-
-		guint32 offset;
-		offset= 0;
-
-		/* render flags tree */
-		proto_item *flags;
-		flags = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_flags, tvb, offset, 1, pck->flags,"0x%X", pck->flags);
-
-		proto_item *flag_tree;
-		flag_tree = proto_item_add_subtree(flags, ett_cattp_flags);
-
-		guint8 bit_offset;
-		bit_offset = 0;
-
-		proto_tree_add_bits_item(flag_tree, hf_cattp_flag_syn, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-		bit_offset++;
-
-		proto_tree_add_bits_item(flag_tree, hf_cattp_flag_ack, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-		bit_offset++;
-
-		proto_tree_add_bits_item(flag_tree, hf_cattp_flag_eak, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-		bit_offset++;
-
-		proto_tree_add_bits_item(flag_tree, hf_cattp_flag_rst, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-		bit_offset++;
-
-		proto_tree_add_bits_item(flag_tree, hf_cattp_flag_nul, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-		bit_offset++;
-
-		proto_tree_add_bits_item(flag_tree, hf_cattp_flag_seg, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-
-		proto_tree_add_uint_format_value(flag_tree, hf_cattp_version, tvb,offset, 1, pck->version,"%u", pck->version);
-
-		offset += 4; /* skip RFU and header len */
-
-		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_srcport, tvb, offset, 2, pck->srcport,"%u", pck->srcport);
-		offset += 2;
-
-		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_dstport, tvb, offset, 2, pck->dstport,"%u", pck->dstport);
-		offset += 2;
-
-		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_datalen, tvb, offset, 2, pck->dlen,"%u", pck->dlen);
-		offset += 2;
-
-		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_seq, tvb, offset, 2, pck->seqno,"%u", pck->seqno);
-		offset += 2;
-
-		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_ack, tvb, offset, 2, pck->ackno,"%u", pck->ackno);
-		offset+=2;
-
-		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_windowsize, tvb, offset, 2, pck->wsize,"%u", pck->wsize);
-		offset+=2;
-
-		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"%X", pck->chksum);
-		offset+=2;
-
-		if (pck->syn) {
-			proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, pck->pdu.syn.maxpdu,"%u", pck->pdu.syn.maxpdu);
-			offset+=2;
-
-			proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxsdu, tvb, offset, 2, pck->pdu.syn.maxsdu,"%u", pck->pdu.syn.maxsdu);
-			offset+=2;
-
-			proto_item *idi;
-			idi = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_idlen, tvb, offset, 1, pck->pdu.syn.idlen,"%u", pck->pdu.syn.idlen);
-			offset++;
-
-			proto_item *id_tree;
-			id_tree = proto_item_add_subtree(idi, ett_cattp_id);
-
-			if (pck->pdu.syn.idlen > 0) {
-				wmem_strbuf_t *buf;
-				buf = wmem_strbuf_new(wmem_packet_scope(), "");
-
-				int i;
-				if (pck->pdu.syn.idlen == ICCID_LEN && ICCID_PREFIX == pck->pdu.syn.id[0]) {
-					/* switch nibbles */
-					for (i = 0;i < pck->pdu.syn.idlen;i++) {
-						guint8 c;
-						c = pck->pdu.syn.id[i];
-
-						guint8 n;
-						n = ((c & 0xF0) >> 4) + ((c & 0x0F) << 4);
-						wmem_strbuf_append_printf(buf,"%02X",n);
-					}
-
-					proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s (ICCID)", wmem_strbuf_get_str(buf));
-					offset += pck->pdu.syn.idlen;
-				} else {
-				
-					for (i = 0;i < pck->pdu.syn.idlen;i++) {
-						wmem_strbuf_append_printf(buf,"%02X",pck->pdu.syn.id[i]);
-					}
-
-					proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s", wmem_strbuf_get_str(buf));
-					offset += pck->pdu.syn.idlen;
-				}
-			}
-		} else if (pck->eak) {
-			/* LIST all acks */
-		} else if (pck->rst) {
-			proto_tree_add_uint_format_value(cattp_tree, hf_cattp_rc, tvb, offset, 1, pck->pdu.rst.rc,"%u", pck->pdu.rst.rc);
-			offset++;
-		} else {
-
-		}
-	}
+    dissector_add_uint("udp.port", gcattp_port, cattp_handle);
+    heur_dissector_add("udp",dissect_cattp_heur,proto_cattp);
 }
+
+static
+cattp_pck* parse_cattp_packet(tvbuff_t *tvb)
+{
+    cattp_pck* ret;
+    ret = wmem_alloc(wmem_packet_scope(),sizeof(cattp_pck));
+
+    /* Ceck if the standard header fits in. */
+    gulong len;
+    len = tvb_captured_length(tvb);
+    if (len < CATTP_HBLEN) {
+        /* this is not a vallid CATTP packet */
+        return NULL;
+    }
+
+    /* Parse the header. */
+    int offset;
+    offset = 0;
+    guint8 fb;
+    fb = tvb_get_guint8(tvb,offset);
+    offset++;
+
+    ret->flags = fb & 0xFC; /* mask the flags only */
+
+    ret->syn = (fb & F_SYN) > 0;
+    ret->ack = (fb & F_ACK) > 0;
+    ret->eak = (fb & F_EAK) > 0;
+    ret->rst = (fb & F_RST) > 0;
+    ret->nul = (fb & F_NUL) > 0;
+    ret->seg = (fb & F_SEG) > 0;
+
+    ret->version = fb & M_VERSION; /* mask the version only */
+
+    ret->rfu = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+    ret->hlen = tvb_get_guint8(tvb,offset);
+    offset++;
+    ret->srcport = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+    ret->dstport = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+    ret->dlen = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+    ret->seqno = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+    ret->ackno = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+    ret->wsize = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+    ret->chksum = tvb_get_ntohs(tvb,offset);
+    offset+=2;
+
+    /* Verify the header: */
+    if ((ret->hlen + ret->dlen) != len) {
+        /* Invalid header/data len -> abort */
+        return NULL;
+    }
+
+    /* Parse SYN (only syn flag set) */
+    if ((ret->flags & M_PDU_SYN) == F_SYN) {
+        ret->pdu.syn.maxpdu = tvb_get_ntohs(tvb,offset);
+        offset+=2;
+        ret->pdu.syn.maxsdu = tvb_get_ntohs(tvb,offset);
+        offset+=2;
+
+        int idlen;
+        idlen = ret->pdu.syn.idlen = tvb_get_guint8(tvb,offset);
+        offset++;
+
+        if (idlen != ret->hlen - offset) {
+            return NULL;
+        }
+
+        guint8* id;
+        id = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * idlen + 1);
+
+        int i;
+        for (i = 0; i <idlen; i++) {
+            id[i] = tvb_get_guint8(tvb,offset);
+            offset++;
+        }
+        id[idlen] = 0;
+        ret->pdu.syn.id = id;
+        return ret;
+    }
+
+    /* Parse ACK PDU */
+    if ((ret->flags & M_PDU_ACK) == F_ACK) {
+        if (ret->flags & F_EAK) {
+            int eak_len;
+            eak_len = ret->pdu.ack.eak_len = (len-CATTP_HBLEN) >> 1;
+            ret->pdu.ack.eaks = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * eak_len +1);
+
+            int i;
+            for (i = 0; i < eak_len; i++) {
+                ret->pdu.ack.eaks[i] = tvb_get_ntohs(tvb,offset);
+                offset+=2;
+            }
+            ret->pdu.ack.eaks[eak_len] = 0;
+        } else {
+            ret->pdu.ack.eak_len = 0;
+            ret->pdu.ack.eaks = NULL;
+        }
+
+        if ((ret->flags & F_NUL) && ret->dlen) {
+            return NULL;
+        }
+
+        if (ret->dlen > 0) {
+            guint8* data;
+            data = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * ret->dlen + 1);
+
+            int i;
+            for (i = 0; i < ret->dlen; i++) {
+                data[i] = tvb_get_guint8(tvb,offset);
+                offset++;
+            }
+            data[ret->dlen] = 0;
+        }
+        return ret;
+    }
+
+    /* Parse RST PDU */
+    if ((ret->flags & M_PDU_RST) == F_RST) {
+        ret->pdu.rst.rc = tvb_get_guint8(tvb,offset);
+        offset++;
+        return ret;
+    }
+    return NULL;
+}
+
+static gboolean
+dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
+{
+    cattp_pck* pck = parse_cattp_packet(tvb);
+
+    if (pck == NULL) {
+        return FALSE;
+    }
+
+    dissect_cattp(tvb,pinfo,tree);
+    return TRUE;
+}
+
+static void
+dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
+{
+    cattp_pck* pck;
+    pck = parse_cattp_packet(tvb);
+
+    if (pck == NULL) {
+        return;
+    }
+
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, "UDP CAT-TP");
+
+    /* Clear out stuff in the info column */
+    col_clear(pinfo->cinfo,COL_INFO);
+
+    col_add_fstr(pinfo->cinfo,COL_INFO,"%u > %u ",pck->srcport,pck->dstport);
+    if ((pck->flags & M_PDU_SYN) == F_SYN)
+        col_append_fstr(pinfo->cinfo,COL_INFO,"[SYN PDU] IdLen=%u ",pck->pdu.syn.idlen);
+    else if ((pck->flags & M_PDU_ACK) == F_ACK)
+        col_append_fstr(pinfo->cinfo,COL_INFO,"[ACK PDU] ");
+    else if ((pck->flags & M_PDU_RST) == F_RST)
+        col_append_fstr(pinfo->cinfo,COL_INFO,"[RST] Reason=\"%s\" ",cattp_reset_reason_code(pck->pdu.rst.rc));
+    
+
+    col_append_fstr(pinfo->cinfo,COL_INFO,"Flags=0x%02X DataLen=%u Ack=%u Seq=%u WSize=%u",pck->flags,pck->dlen,pck->ackno, pck->seqno, pck->wsize);
+
+    if (tree) { /* we are being asked for details */
+        proto_item *ti;
+        ti = proto_tree_add_protocol_format(tree, proto_cattp, tvb, 0, pck->hlen,
+                                            "Card Application Toolkit Transport Protocol v%u, Src Port: %u, Dst Port: %u)",
+                                            pck->version,pck->srcport, pck->dstport);
+
+        proto_item *cattp_tree;
+        cattp_tree = proto_item_add_subtree(ti, ett_cattp);
+
+        guint32 offset;
+        offset= 0;
+
+        /* render flags tree */
+        proto_item *flags;
+        flags = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_flags, tvb, offset, 1, pck->flags,"0x%X", pck->flags);
+
+        proto_item *flag_tree;
+        flag_tree = proto_item_add_subtree(flags, ett_cattp_flags);
+
+        guint8 bit_offset;
+        bit_offset = 0;
+
+        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_syn, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+        bit_offset++;
+
+        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_ack, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+        bit_offset++;
+
+        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_eak, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+        bit_offset++;
+
+        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_rst, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+        bit_offset++;
+
+        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_nul, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+        bit_offset++;
+
+        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_seg, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+
+        proto_tree_add_uint_format_value(flag_tree, hf_cattp_version, tvb,offset, 1, pck->version,"%u", pck->version);
+
+        offset += 4; /* skip RFU and header len */
+
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_srcport, tvb, offset, 2, pck->srcport,"%u", pck->srcport);
+        offset += 2;
+
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_dstport, tvb, offset, 2, pck->dstport,"%u", pck->dstport);
+        offset += 2;
+
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_datalen, tvb, offset, 2, pck->dlen,"%u", pck->dlen);
+        offset += 2;
+
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_seq, tvb, offset, 2, pck->seqno,"%u", pck->seqno);
+        offset += 2;
+
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_ack, tvb, offset, 2, pck->ackno,"%u", pck->ackno);
+        offset+=2;
+
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_windowsize, tvb, offset, 2, pck->wsize,"%u", pck->wsize);
+        offset+=2;
+
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"%X", pck->chksum);
+        offset+=2;
+
+        if (pck->syn) {
+            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, pck->pdu.syn.maxpdu,"%u", pck->pdu.syn.maxpdu);
+            offset+=2;
+
+            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxsdu, tvb, offset, 2, pck->pdu.syn.maxsdu,"%u", pck->pdu.syn.maxsdu);
+            offset+=2;
+
+            proto_item *idi;
+            idi = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_idlen, tvb, offset, 1, pck->pdu.syn.idlen,"%u", pck->pdu.syn.idlen);
+            offset++;
+
+            proto_item *id_tree;
+            id_tree = proto_item_add_subtree(idi, ett_cattp_id);
+
+            if (pck->pdu.syn.idlen > 0) {
+                wmem_strbuf_t *buf;
+                buf = wmem_strbuf_new(wmem_packet_scope(), "");
+
+                int i;
+                if (pck->pdu.syn.idlen == ICCID_LEN && ICCID_PREFIX == pck->pdu.syn.id[0]) {
+                    /* switch nibbles */
+                    for (i = 0; i < pck->pdu.syn.idlen; i++) {
+                        guint8 c;
+                        c = pck->pdu.syn.id[i];
+
+                        guint8 n;
+                        n = ((c & 0xF0) >> 4) + ((c & 0x0F) << 4);
+                        wmem_strbuf_append_printf(buf,"%02X",n);
+                    }
+
+                    proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s (ICCID)", wmem_strbuf_get_str(buf));
+                    offset += pck->pdu.syn.idlen;
+                } else {
+
+                    for (i = 0; i < pck->pdu.syn.idlen; i++) {
+                        wmem_strbuf_append_printf(buf,"%02X",pck->pdu.syn.id[i]);
+                    }
+
+                    proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s", wmem_strbuf_get_str(buf));
+                    offset += pck->pdu.syn.idlen;
+                }
+            }
+        } else if (pck->eak) {
+            /* LIST all acks */
+        } else if (pck->rst) {
+            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_rc, tvb, offset, 1, pck->pdu.rst.rc,"%u (\"%s\")", pck->pdu.rst.rc,cattp_reset_reason_code(pck->pdu.rst.rc));
+            offset++;
+        } else {
+
+        }
+    }
+}
+
+/*
+ * Editor modelines  -  https://www.wireshark.org/tools/modelines.html
+ *
+ * Local variables:
+ * c-basic-offset: 4
+ * tab-width: 8
+ * indent-tabs-mode: t
+ * End:
+ *
+ * vi: set shiftwidth=4 tabstop=8 expandtab:
+ * :indentSize=4:tabSize=8:noTabs=false:
+ */

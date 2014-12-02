@@ -17,6 +17,13 @@ For debian based environments the following packages are needed to manually buil
 
 The wireshark source tree from :
 
+##Development
+
+Source code formatting is done using :
+```
+astyle -A3 < packet-cattp.c
+```
+
 [Official wireshark git repo](https://code.wireshark.org/review/p/wireshark.git) or the [Github repository](https://github.com/wireshark/wireshark)
 
 ## TODO
