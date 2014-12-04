@@ -43,10 +43,10 @@
 #define M_PDU_RST 0xBC 	/* RST (ACK dont caret) without version */
 #define M_VERSION 0x03 	/* only Version */
 
-#define ICCID_LEN 10
 #define ICCID_PREFIX 0x98
 
-#define CATTP_MAX_EAK_DISPLAY 32
+#define CATTP_MAX_EAK_DISPLAY 10
+#define CATTP_MAX_IDLEN_DISPLAY 40
 
 typedef struct {
     gboolean syn;
@@ -138,6 +138,8 @@ static int hf_cattp_maxsdu = -1;
 static int hf_cattp_rc = -1;
 static int hf_cattp_eaklen = -1;
 static int hf_cattp_eaks = -1;
+
+static dissector_handle_t data_handle;
 
 static const char* cattp_reset_reason_code(guint8 idx)
 {
@@ -346,6 +348,7 @@ proto_reg_handoff_cattp(void)
 
     /* Create dissector handle */
     cattp_handle = create_dissector_handle(dissect_cattp, proto_cattp);
+    data_handle = find_dissector("data");
 
     dissector_add_uint("udp.port", gcattp_port, cattp_handle);
     heur_dissector_add("udp",dissect_cattp_heur,proto_cattp);
@@ -555,7 +558,11 @@ dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, catt
         int i;
 
         buf = wmem_strbuf_new(wmem_packet_scope(), "");
-        if (pck->pdu.syn.idlen == ICCID_LEN && ICCID_PREFIX == pck->pdu.syn.id[0]) {
+
+	/* Optional code. Checks whether identification field may be an ICCID. 
+	 * It has to be considered to move this logic to another layer / dissector. 
+	 * However it is common to send ICCID as Identification for OTA download. */
+        if ((pck->pdu.syn.idlen <= 10 || pck->pdu.syn.idlen >= 9) && ICCID_PREFIX == pck->pdu.syn.id[0]) {
             /* switch nibbles */
             for (i = 0; i < pck->pdu.syn.idlen; i++) {
                 guint8 c, n;
@@ -570,10 +577,13 @@ dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, catt
                                               "%s (ICCID)", wmem_strbuf_get_str(buf));
             offset += pck->pdu.syn.idlen;
         } else {
-
-            for (i = 0; i < pck->pdu.syn.idlen; i++) {
+            for (i = 0; i < pck->pdu.syn.idlen && i < CATTP_MAX_IDLEN_DISPLAY; i++) {
                 wmem_strbuf_append_printf(buf,"%02X",pck->pdu.syn.id[i]);
             }
+
+	    if (i >= CATTP_MAX_IDLEN_DISPLAY) {
+                wmem_strbuf_append_printf(buf,"... [%u bytes more]", pck->pdu.syn.idlen - i);
+	    }
 
             proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen,
                                               pck->pdu.syn.id, "%s", wmem_strbuf_get_str(buf));
@@ -632,10 +642,16 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
     else if ((pck->flags & M_PDU_ACK) == F_ACK)
         col_append_fstr(pinfo->cinfo,COL_INFO,"[ACK PDU] ");
     else if ((pck->flags & M_PDU_RST) == F_RST)
-        col_append_fstr(pinfo->cinfo,COL_INFO,"[RST] Reason=\"%s\" ",cattp_reset_reason_code(pck->pdu.rst.rc));
+        col_append_fstr(pinfo->cinfo,COL_INFO,"[RST PDU] Reason=\"%s\" ",cattp_reset_reason_code(pck->pdu.rst.rc));
 
 
-    col_append_fstr(pinfo->cinfo,COL_INFO,"Flags=0x%02X DataLen=%u Ack=%u Seq=%u WSize=%u",pck->flags,pck->dlen,pck->ackno, pck->seqno, pck->wsize);
+
+    col_append_fstr(pinfo->cinfo,COL_INFO,"Flags=0x%02X Ack=%u Seq=%u WSize=%u ",pck->flags,pck->ackno, pck->seqno, pck->wsize);
+    if (pck->dlen > 0)
+    	col_append_fstr(pinfo->cinfo,COL_INFO,"DataLen=%u ",pck->dlen);
+
+    if (pck->flags & F_EAK)
+    	col_append_fstr(pinfo->cinfo,COL_INFO,"EAKs=%u ",pck->pdu.ack.eak_len);
 
     if (tree) { /* we are being asked for details */
         proto_item *ti, *cattp_tree;
@@ -694,6 +710,15 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
                                              "%u (\"%s\")", pck->pdu.rst.rc,cattp_reset_reason_code(pck->pdu.rst.rc));
             offset++;
         } /* for other PDU types nothing special to be displayed in detail tree. */
+
+	/*TODO: check whether to call heuristic dissectors .*/
+	if (pck->dlen > 0) { /* Call generic data handle if data exists. */
+		guint32 len,reported_len; 
+		len = tvb_captured_length_remaining(tvb, offset);                                                                                                           
+  		reported_len = tvb_reported_length_remaining(tvb, offset); 
+		tvb = tvb_new_subset(tvb, offset, len, reported_len);
+		call_dissector(data_handle,tvb, pinfo, tree);
+	}
     }
 }
 
