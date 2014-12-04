@@ -21,7 +21,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
-
 #include "config.h"
 
 #include <epan/packet.h>
@@ -47,45 +46,7 @@
 #define ICCID_LEN 10
 #define ICCID_PREFIX 0x98
 
-/* Function to register the dissector, called by plugin infrastructure. */
-void proto_register_cattp();
-
-/* Handoff */
-void proto_reg_handoff_cattp();
-
-/* The actual dissection */
-static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree);
-
-/* The heuristic dissector function checks if the UDP packet may be a cattp packet */
-static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
-
-static int proto_cattp = -1;
-static guint gcattp_port = 0;
-
-static gint ett_cattp = -1;
-static gint ett_cattp_id = -1;
-static gint ett_cattp_flags = -1;
-
-static int hf_cattp_flags = -1;
-static int hf_cattp_flag_syn = -1;
-static int hf_cattp_flag_ack = -1;
-static int hf_cattp_flag_eak = -1;
-static int hf_cattp_flag_rst = -1;
-static int hf_cattp_flag_nul = -1;
-static int hf_cattp_flag_seg = -1;
-static int hf_cattp_version = -1;
-static int hf_cattp_srcport = -1;
-static int hf_cattp_dstport = -1;
-static int hf_cattp_datalen = -1;
-static int hf_cattp_seq = -1;
-static int hf_cattp_ack = -1;
-static int hf_cattp_windowsize = -1;
-static int hf_cattp_checksum = -1;
-static int hf_cattp_identification = -1;
-static int hf_cattp_idlen = -1;
-static int hf_cattp_maxpdu = -1;
-static int hf_cattp_maxsdu = -1;
-static int hf_cattp_rc = -1;
+#define CATTP_MAX_EAK_DISPLAY 32
 
 typedef struct {
     gboolean syn;
@@ -123,20 +84,76 @@ typedef struct {
     } pdu;
 } cattp_pck;
 
-static const char* cattp_reset_reason[] = {
-    "Normal Ending",
-    "Connection set-up failed, illegal parameters",
-    "Temporarily unable to set up this connection",
-    "Requested Port not available",
-    "Unexpected PDU received",
-    "Maximum retries exceeded",
-    "Version not supported",
-    "RFU"
-};
+/* Function to register the dissector, called by plugin infrastructure. */
+void proto_register_cattp();
+
+/* Handoff */
+void proto_reg_handoff_cattp();
+
+/* Dissection of the base header */
+static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree);
+
+/* Dissection of the packet flags */
+static guint32 dissect_cattp_flags(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, cattp_pck *pck);
+
+/* Dissection of SYN PDUs */
+static guint32 dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *tree, guint32 offset, cattp_pck *pck);
+
+/* Dissection of Extended Acknowledgement PDUs */
+static guint32 dissect_cattp_eakpdu(tvbuff_t *tvb, proto_tree *tree, guint32 offset, cattp_pck *pck);
+
+/* The heuristic dissector function checks if the UDP packet may be a cattp packet */
+static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data);
+
+/* Resolve RS reason code to a textual representation. */
+static const char* cattp_reset_reason_code(guint8 idx);
+
+static int proto_cattp = -1;
+static guint gcattp_port = 0;
+
+static gint ett_cattp = -1;
+static gint ett_cattp_id = -1;
+static gint ett_cattp_flags = -1;
+static gint ett_cattp_eaks = -1;
+
+static int hf_cattp_flags = -1;
+static int hf_cattp_flag_syn = -1;
+static int hf_cattp_flag_ack = -1;
+static int hf_cattp_flag_eak = -1;
+static int hf_cattp_flag_rst = -1;
+static int hf_cattp_flag_nul = -1;
+static int hf_cattp_flag_seg = -1;
+static int hf_cattp_version = -1;
+static int hf_cattp_srcport = -1;
+static int hf_cattp_dstport = -1;
+static int hf_cattp_datalen = -1;
+static int hf_cattp_seq = -1;
+static int hf_cattp_ack = -1;
+static int hf_cattp_windowsize = -1;
+static int hf_cattp_checksum = -1;
+static int hf_cattp_identification = -1;
+static int hf_cattp_idlen = -1;
+static int hf_cattp_maxpdu = -1;
+static int hf_cattp_maxsdu = -1;
+static int hf_cattp_rc = -1;
+static int hf_cattp_eaklen = -1;
+static int hf_cattp_eaks = -1;
 
 static const char* cattp_reset_reason_code(guint8 idx)
 {
+    static const char* cattp_reset_reason[] = {
+        "Normal Ending",
+        "Connection set-up failed, illegal parameters",
+        "Temporarily unable to set up this connection",
+        "Requested Port not available",
+        "Unexpected PDU received",
+        "Maximum retries exceeded",
+        "Version not supported",
+        "RFU"
+    };
+
     static guint8 rcs = sizeof(cattp_reset_reason)/sizeof(cattp_reset_reason[0]);
+
     if (idx >= rcs) {
         return cattp_reset_reason[rcs-1];
     } else {
@@ -294,6 +311,20 @@ proto_register_cattp(void)
                 NULL, HFILL
             }
         },
+        {
+            &hf_cattp_eaks,
+            {
+                "Acknowledgement Number","cattp.eak", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        },
+        {
+            &hf_cattp_eaklen,
+            {
+                "Extended Acknowledgement Numbers","cattp.eaks", FT_UINT16, BASE_DEC, NULL, 0x0,
+                NULL, HFILL
+            }
+        }
     };
 
     /* Setup protocol subtree array */
@@ -301,6 +332,7 @@ proto_register_cattp(void)
         &ett_cattp,
         &ett_cattp_flags,
         &ett_cattp_id,
+        &ett_cattp_eaks
     };
 
     proto_register_field_array(proto_cattp, hf, array_length(hf));
@@ -319,8 +351,8 @@ proto_reg_handoff_cattp(void)
     heur_dissector_add("udp",dissect_cattp_heur,proto_cattp);
 }
 
-static
-cattp_pck* parse_cattp_packet(tvbuff_t *tvb)
+static cattp_pck* 
+parse_cattp_packet(tvbuff_t *tvb)
 {
     cattp_pck* ret;
     ret = wmem_alloc(wmem_packet_scope(),sizeof(cattp_pck));
@@ -462,12 +494,129 @@ dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *da
     return TRUE;
 }
 
+static guint32
+dissect_cattp_flags(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, cattp_pck *pck)
+{
+    proto_item *flags, *flag_tree;
+    guint8 bit_offset;
+
+    flags = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_flags, tvb, offset, 1, pck->flags,"0x%X", pck->flags);
+
+    flag_tree = proto_item_add_subtree(flags, ett_cattp_flags);
+
+    bit_offset = 0;
+
+    proto_tree_add_bits_item(flag_tree, hf_cattp_flag_syn, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+    bit_offset++;
+
+    proto_tree_add_bits_item(flag_tree, hf_cattp_flag_ack, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+    bit_offset++;
+
+    proto_tree_add_bits_item(flag_tree, hf_cattp_flag_eak, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+    bit_offset++;
+
+    proto_tree_add_bits_item(flag_tree, hf_cattp_flag_rst, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+    bit_offset++;
+
+    proto_tree_add_bits_item(flag_tree, hf_cattp_flag_nul, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+    bit_offset++;
+
+    proto_tree_add_bits_item(flag_tree, hf_cattp_flag_seg, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
+
+    proto_tree_add_uint_format_value(flag_tree, hf_cattp_version, tvb,offset, 1,
+                                     pck->version,"%u", pck->version);
+
+    offset += 4; /* skip RFU and header len */
+    return offset;
+}
+
+static guint32
+dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, cattp_pck *pck)
+{
+    proto_item *idi, *id_tree;
+
+    proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2,
+                                     pck->pdu.syn.maxpdu,
+                                     "%u", pck->pdu.syn.maxpdu);
+    offset += 2;
+
+    proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxsdu, tvb, offset,2,
+                                     pck->pdu.syn.maxsdu, "%u", pck->pdu.syn.maxsdu);
+    offset += 2;
+
+    idi = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_idlen, tvb, offset, 1,
+                                           pck->pdu.syn.idlen, "%u", pck->pdu.syn.idlen);
+    offset++;
+
+    id_tree = proto_item_add_subtree(idi, ett_cattp_id);
+
+    if (pck->pdu.syn.idlen > 0) {
+        wmem_strbuf_t *buf;
+        int i;
+
+        buf = wmem_strbuf_new(wmem_packet_scope(), "");
+        if (pck->pdu.syn.idlen == ICCID_LEN && ICCID_PREFIX == pck->pdu.syn.id[0]) {
+            /* switch nibbles */
+            for (i = 0; i < pck->pdu.syn.idlen; i++) {
+                guint8 c, n;
+
+                c = pck->pdu.syn.id[i];
+                n = ((c & 0xF0) >> 4) + ((c & 0x0F) << 4);
+                wmem_strbuf_append_printf(buf,"%02X",n);
+            }
+
+            proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset,
+                                              pck->pdu.syn.idlen, pck->pdu.syn.id,
+                                              "%s (ICCID)", wmem_strbuf_get_str(buf));
+            offset += pck->pdu.syn.idlen;
+        } else {
+
+            for (i = 0; i < pck->pdu.syn.idlen; i++) {
+                wmem_strbuf_append_printf(buf,"%02X",pck->pdu.syn.id[i]);
+            }
+
+            proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen,
+                                              pck->pdu.syn.id, "%s", wmem_strbuf_get_str(buf));
+            offset += pck->pdu.syn.idlen;
+        }
+    }
+    return offset;
+}
+
+static guint32
+dissect_cattp_eakpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, cattp_pck *pck)
+{
+    proto_item *eaki;
+    eaki = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_eaklen, tvb, offset, pck->pdu.ack.eak_len * 2,
+                                            pck->pdu.ack.eak_len, "%u PDUs",pck->pdu.ack.eak_len);
+
+    if (pck->pdu.ack.eak_len > 0) {
+        proto_item *eak_tree;
+        int i;
+
+        eak_tree = proto_item_add_subtree(eaki,ett_cattp_eaks);
+
+        for (i = 0; i < pck->pdu.ack.eak_len && i < CATTP_MAX_EAK_DISPLAY; i++) {
+            proto_tree_add_uint_format_value(eak_tree, hf_cattp_eaks, tvb, offset, 2,
+                                             pck->pdu.ack.eaks[i], "%u", pck->pdu.ack.eaks[i]);
+            offset += 2;
+        }
+
+        if (i >= CATTP_MAX_EAK_DISPLAY) {
+            proto_tree_add_text(eak_tree, tvb, offset, pck->hlen - offset,
+                                "[ %u remaining EAKS, max display count of %u reached ]",
+                                pck->pdu.ack.eak_len - i,CATTP_MAX_EAK_DISPLAY);
+        }
+    }
+    return offset;
+}
+
 static void
 dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 {
     cattp_pck* pck;
-    pck = parse_cattp_packet(tvb);
 
+    pck = parse_cattp_packet(tvb);
     if (pck == NULL) {
         return;
     }
@@ -484,124 +633,67 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
         col_append_fstr(pinfo->cinfo,COL_INFO,"[ACK PDU] ");
     else if ((pck->flags & M_PDU_RST) == F_RST)
         col_append_fstr(pinfo->cinfo,COL_INFO,"[RST] Reason=\"%s\" ",cattp_reset_reason_code(pck->pdu.rst.rc));
-    
+
 
     col_append_fstr(pinfo->cinfo,COL_INFO,"Flags=0x%02X DataLen=%u Ack=%u Seq=%u WSize=%u",pck->flags,pck->dlen,pck->ackno, pck->seqno, pck->wsize);
 
     if (tree) { /* we are being asked for details */
-        proto_item *ti;
+        proto_item *ti, *cattp_tree;
+        guint32 offset;
+
         ti = proto_tree_add_protocol_format(tree, proto_cattp, tvb, 0, pck->hlen,
                                             "Card Application Toolkit Transport Protocol v%u, Src Port: %u, Dst Port: %u)",
                                             pck->version,pck->srcport, pck->dstport);
 
-        proto_item *cattp_tree;
         cattp_tree = proto_item_add_subtree(ti, ett_cattp);
 
-        guint32 offset;
-        offset= 0;
-
         /* render flags tree */
-        proto_item *flags;
-        flags = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_flags, tvb, offset, 1, pck->flags,"0x%X", pck->flags);
+        offset = dissect_cattp_flags(tvb,cattp_tree,0,pck);
 
-        proto_item *flag_tree;
-        flag_tree = proto_item_add_subtree(flags, ett_cattp_flags);
-
-        guint8 bit_offset;
-        bit_offset = 0;
-
-        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_syn, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-        bit_offset++;
-
-        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_ack, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-        bit_offset++;
-
-        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_eak, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-        bit_offset++;
-
-        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_rst, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-        bit_offset++;
-
-        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_nul, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-        bit_offset++;
-
-        proto_tree_add_bits_item(flag_tree, hf_cattp_flag_seg, tvb,bit_offset, 1, ENC_BIG_ENDIAN);
-
-        proto_tree_add_uint_format_value(flag_tree, hf_cattp_version, tvb,offset, 1, pck->version,"%u", pck->version);
-
-        offset += 4; /* skip RFU and header len */
-
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_srcport, tvb, offset, 2, pck->srcport,"%u", pck->srcport);
+        /* Parse cattp source port. */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_srcport, tvb, offset, 2,
+                                         pck->srcport,"%u", pck->srcport);
         offset += 2;
 
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_dstport, tvb, offset, 2, pck->dstport,"%u", pck->dstport);
+        /* Parse cattp destination port. */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_dstport, tvb, offset, 2,
+                                         pck->dstport,"%u", pck->dstport);
         offset += 2;
 
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_datalen, tvb, offset, 2, pck->dlen,"%u", pck->dlen);
+        /* Parse length of payload. */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_datalen, tvb, offset, 2,
+                                         pck->dlen,"%u", pck->dlen);
         offset += 2;
 
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_seq, tvb, offset, 2, pck->seqno,"%u", pck->seqno);
+        /* Parse sequence number. */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_seq, tvb, offset, 2,
+                                         pck->seqno,"%u", pck->seqno);
         offset += 2;
 
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_ack, tvb, offset, 2, pck->ackno,"%u", pck->ackno);
-        offset+=2;
+        /* Parse acknowledgement number. */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_ack, tvb, offset, 2,
+                                         pck->ackno,"%u", pck->ackno);
+        offset += 2;
 
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_windowsize, tvb, offset, 2, pck->wsize,"%u", pck->wsize);
-        offset+=2;
+        /* Parse window size. */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_windowsize, tvb, offset, 2,
+                                         pck->wsize,"%u", pck->wsize);
+        offset += 2;
 
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"%X", pck->chksum);
-        offset+=2;
+        /* Parse checksum value. TODO: validate checksum */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
+                                         pck->chksum,"0x%X", pck->chksum);
+        offset += 2;
 
-        if (pck->syn) {
-            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, pck->pdu.syn.maxpdu,"%u", pck->pdu.syn.maxpdu);
-            offset+=2;
-
-            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_maxsdu, tvb, offset, 2, pck->pdu.syn.maxsdu,"%u", pck->pdu.syn.maxsdu);
-            offset+=2;
-
-            proto_item *idi;
-            idi = proto_tree_add_uint_format_value(cattp_tree, hf_cattp_idlen, tvb, offset, 1, pck->pdu.syn.idlen,"%u", pck->pdu.syn.idlen);
+        if (pck->syn)
+            offset = dissect_cattp_synpdu(tvb,cattp_tree,offset,pck);
+        else if (pck->eak)
+            offset = dissect_cattp_eakpdu(tvb,cattp_tree,offset,pck);
+        else if (pck->rst) {
+            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_rc, tvb, offset, 1, pck->pdu.rst.rc,
+                                             "%u (\"%s\")", pck->pdu.rst.rc,cattp_reset_reason_code(pck->pdu.rst.rc));
             offset++;
-
-            proto_item *id_tree;
-            id_tree = proto_item_add_subtree(idi, ett_cattp_id);
-
-            if (pck->pdu.syn.idlen > 0) {
-                wmem_strbuf_t *buf;
-                buf = wmem_strbuf_new(wmem_packet_scope(), "");
-
-                int i;
-                if (pck->pdu.syn.idlen == ICCID_LEN && ICCID_PREFIX == pck->pdu.syn.id[0]) {
-                    /* switch nibbles */
-                    for (i = 0; i < pck->pdu.syn.idlen; i++) {
-                        guint8 c;
-                        c = pck->pdu.syn.id[i];
-
-                        guint8 n;
-                        n = ((c & 0xF0) >> 4) + ((c & 0x0F) << 4);
-                        wmem_strbuf_append_printf(buf,"%02X",n);
-                    }
-
-                    proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s (ICCID)", wmem_strbuf_get_str(buf));
-                    offset += pck->pdu.syn.idlen;
-                } else {
-
-                    for (i = 0; i < pck->pdu.syn.idlen; i++) {
-                        wmem_strbuf_append_printf(buf,"%02X",pck->pdu.syn.id[i]);
-                    }
-
-                    proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen, pck->pdu.syn.id,"%s", wmem_strbuf_get_str(buf));
-                    offset += pck->pdu.syn.idlen;
-                }
-            }
-        } else if (pck->eak) {
-            /* LIST all acks */
-        } else if (pck->rst) {
-            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_rc, tvb, offset, 1, pck->pdu.rst.rc,"%u (\"%s\")", pck->pdu.rst.rc,cattp_reset_reason_code(pck->pdu.rst.rc));
-            offset++;
-        } else {
-
-        }
+        } /* for other PDU types nothing special to be displayed in detail tree. */
     }
 }
 
@@ -610,10 +702,10 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
  *
  * Local variables:
  * c-basic-offset: 4
- * tab-width: 8
+ * tab-width: 4
  * indent-tabs-mode: t
  * End:
  *
- * vi: set shiftwidth=4 tabstop=8 expandtab:
- * :indentSize=4:tabSize=8:noTabs=false:
+ * vi: set shiftwidth=4 tabstop=4 expandtab:
+ * :indentSize=4:tabSize=4:noTabs=false:
  */

@@ -27,7 +27,6 @@ astyle -A3 < packet-cattp.c
 [Official wireshark git repo](https://code.wireshark.org/review/p/wireshark.git) or the [Github repository](https://github.com/wireshark/wireshark)
 
 ## TODO
- * Splitup PDU type dissecting into seperate functions.
  * Splitup ICCID segments
  * check how to represent a session/connection
  * add build infrastructure (Makefile templates from example module)
