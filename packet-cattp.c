@@ -30,10 +30,6 @@
 #include <epan/in_cksum.h>
 #include <string.h>
 
-//may not be needed
-#include <glib.h>
-#include <epan/tvbuff.h>
-
 #define CATTP_HBLEN 18
 #define F_SYN 0x80
 #define F_ACK 0x40
@@ -710,7 +706,7 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
                                          pck->wsize,"%u", pck->wsize);
         offset += 2;
 
-// TODO to be moved to another function
+// TODO to be moved to another (separate) function
 gushort computed_chksum;
 gushort expected_chksum;
 vec_t cksum_vec[1];
