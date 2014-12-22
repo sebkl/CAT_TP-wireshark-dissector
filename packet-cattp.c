@@ -30,6 +30,10 @@
 #include <epan/in_cksum.h>
 #include <string.h>
 
+//may not be needed
+#include <glib.h>
+#include <epan/tvbuff.h>
+
 #define CATTP_HBLEN 18
 #define F_SYN 0x80
 #define F_ACK 0x40
@@ -738,10 +742,7 @@ cksum_data_len = pck->hlen + pck->dlen;
         	expected_chksum += g_ntohs(computed_chksum);
         	expected_chksum = (expected_chksum & 0xFFFF) + (expected_chksum >> 16);
         	expected_chksum = (expected_chksum & 0xFFFF) + (expected_chksum >> 16);
-
-                 proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"0x%X [incorrect, correct SEE THIS LINE ]", expected_chksum);
-		/* TODO: I want to ADD to the tree item the correct checksum. Like the following, it crashes :( */
- // proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"0x%X [incorrect, correct: %s]", pck->chksum, expected_chksum);
+ 		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"0x%X [incorrect, correct: 0x%X]", pck->chksum, expected_chksum);
                  }
 	} /* End of checksum code */
 
