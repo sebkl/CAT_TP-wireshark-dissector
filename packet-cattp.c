@@ -114,6 +114,9 @@ static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree
 /* Resolve RS reason code to a textual representation. */
 static const char* cattp_reset_reason_code(guint8 idx);
 
+/* Verify if received checksum is correct. */
+static gushort expected_chksum(gushort packet_chksum, gushort computed_chksum);
+
 static int proto_cattp = -1;
 static guint gcattp_port = 0;
 
@@ -710,14 +713,11 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
                                          pck->wsize,"%u", pck->wsize);
         offset += 2;
 
-// TODO to be moved to another (separate) function
 gushort computed_chksum;
-gushort expected_chksum;
 vec_t cksum_vec[1];
 int header_offset = 0;
 guint cksum_data_len;
 cksum_data_len = pck->hlen + pck->dlen;
-
         if (!cattp_check_checksum) {
           /* We have turned checksum checking off; we do NOT checksum it. */
           proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
@@ -737,12 +737,10 @@ cksum_data_len = pck->hlen + pck->dlen;
                 }
               else {
                  /* Checksum is invalid. Let's compute the expected checksum, based on the data we have */
-		gushort expected_chksum;
-		expected_chksum = pck->chksum;
-        	expected_chksum += g_ntohs(computed_chksum);
-        	expected_chksum = (expected_chksum & 0xFFFF) + (expected_chksum >> 16);
-        	expected_chksum = (expected_chksum & 0xFFFF) + (expected_chksum >> 16);
- 		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,"0x%X [incorrect, correct: 0x%X]", pck->chksum, expected_chksum);
+		gushort expected_cksum;
+		expected_cksum = expected_chksum(pck->chksum, computed_chksum);
+ 		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,
+			"0x%X [incorrect, correct: 0x%X]", pck->chksum, expected_cksum);
                  }
 	} /* End of checksum code */
 
@@ -767,6 +765,16 @@ cksum_data_len = pck->hlen + pck->dlen;
 		call_dissector(data_handle,tvb, pinfo, tree);
 	}
     }
+}
+
+static gushort expected_chksum(gushort packet_chksum, gushort computed_chksum)
+{
+gushort expected_sum;
+expected_sum = packet_chksum;
+expected_sum += g_ntohs(computed_chksum);
+expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
+expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
+return expected_sum;
 }
 
 /*
