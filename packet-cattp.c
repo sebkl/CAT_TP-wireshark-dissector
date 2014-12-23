@@ -26,7 +26,13 @@
 #include <epan/packet.h>
 #include <epan/prefs.h>
 #include <epan/wmem/wmem.h>
+#include <epan/decode_as.h>
+#include <epan/in_cksum.h>
 #include <string.h>
+
+//may not be needed
+#include <glib.h>
+#include <epan/tvbuff.h>
 
 #define CATTP_HBLEN 18
 #define F_SYN 0x80
@@ -108,6 +114,9 @@ static gboolean dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree
 /* Resolve RS reason code to a textual representation. */
 static const char* cattp_reset_reason_code(guint8 idx);
 
+/* Verify if received checksum is correct. */
+static gushort expected_chksum(gushort packet_chksum, gushort computed_chksum);
+
 static int proto_cattp = -1;
 static guint gcattp_port = 0;
 
@@ -139,7 +148,15 @@ static int hf_cattp_rc = -1;
 static int hf_cattp_eaklen = -1;
 static int hf_cattp_eaks = -1;
 
+
 static dissector_handle_t data_handle;
+
+/* Place CATTP summary in proto tree */
+static gboolean cattp_summary_in_tree = TRUE;
+
+/* Flag to control whether to check the CATTP checksum */
+static gboolean cattp_check_checksum = TRUE;
+
 
 static const char* cattp_reset_reason_code(guint8 idx)
 {
@@ -354,17 +371,17 @@ proto_reg_handoff_cattp(void)
     heur_dissector_add("udp",dissect_cattp_heur,proto_cattp);
 }
 
-static cattp_pck* 
+static cattp_pck*
 parse_cattp_packet(tvbuff_t *tvb)
 {
     cattp_pck* ret;
     ret = wmem_alloc(wmem_packet_scope(),sizeof(cattp_pck));
 
-    /* Ceck if the standard header fits in. */
+    /* Check if the standard header fits in. */
     gulong len;
     len = tvb_captured_length(tvb);
     if (len < CATTP_HBLEN) {
-        /* this is not a vallid CATTP packet */
+        /* this is not a valid CATTP packet */
         return NULL;
     }
 
@@ -559,8 +576,8 @@ dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, catt
 
         buf = wmem_strbuf_new(wmem_packet_scope(), "");
 
-	/* Optional code. Checks whether identification field may be an ICCID. 
-	 * It has to be considered to move this logic to another layer / dissector. 
+	/* Optional code. Checks whether identification field may be an ICCID.
+	 * It has to be considered to move this logic to another layer / dissector.
 	 * However it is common to send ICCID as Identification for OTA download. */
         if ((pck->pdu.syn.idlen <= 10 || pck->pdu.syn.idlen >= 9) && ICCID_PREFIX == pck->pdu.syn.id[0]) {
             /* switch nibbles */
@@ -696,9 +713,37 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
                                          pck->wsize,"%u", pck->wsize);
         offset += 2;
 
-        /* Parse checksum value. TODO: validate checksum */
-        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
-                                         pck->chksum,"0x%X", pck->chksum);
+gushort computed_chksum;
+vec_t cksum_vec[1];
+int header_offset = 0;
+guint cksum_data_len;
+cksum_data_len = pck->hlen + pck->dlen;
+        if (!cattp_check_checksum) {
+          /* We have turned checksum checking off; we do NOT checksum it. */
+          proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
+                                   pck->chksum,"0x%X [validation disabled]", pck->chksum);
+            }
+        else {
+            /* We haven't turned checksum checking off; checksum it. */
+
+            /* Unlike TCP, CATTP does not make use of a pseudo-header for checksum */
+            SET_CKSUM_VEC_TVB(cksum_vec[0], tvb, header_offset, cksum_data_len);
+            computed_chksum = in_cksum(cksum_vec, 1);
+
+	   if (computed_chksum == 0) {
+                /* Checksum is valid */ 
+                   proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
+                                               pck->chksum,"0x%X [validated]", pck->chksum);
+                }
+              else {
+                 /* Checksum is invalid. Let's compute the expected checksum, based on the data we have */
+		gushort expected_cksum;
+		expected_cksum = expected_chksum(pck->chksum, computed_chksum);
+ 		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,
+			"0x%X [incorrect, correct: 0x%X]", pck->chksum, expected_cksum);
+                 }
+	} /* End of checksum code */
+
         offset += 2;
 
         if (pck->syn)
@@ -713,13 +758,23 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 
 	/*TODO: check whether to call heuristic dissectors .*/
 	if (pck->dlen > 0) { /* Call generic data handle if data exists. */
-		guint32 len,reported_len; 
-		len = tvb_captured_length_remaining(tvb, offset);                                                                                                           
-  		reported_len = tvb_reported_length_remaining(tvb, offset); 
+		guint32 len,reported_len;
+		len = tvb_captured_length_remaining(tvb, offset);
+  		reported_len = tvb_reported_length_remaining(tvb, offset);
 		tvb = tvb_new_subset(tvb, offset, len, reported_len);
 		call_dissector(data_handle,tvb, pinfo, tree);
 	}
     }
+}
+
+static gushort expected_chksum(gushort packet_chksum, gushort computed_chksum)
+{
+gushort expected_sum;
+expected_sum = packet_chksum;
+expected_sum += g_ntohs(computed_chksum);
+expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
+expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
+return expected_sum;
 }
 
 /*
