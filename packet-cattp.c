@@ -2,6 +2,7 @@
  * Routines for packet dissection of
  *      ETSI TS 102 127 v6.13.0  (Release 6 / 2009-0r45)
  * Copyright 2014-2014 by Sebastian Kloeppel <sebastian@kloeppel.mobi>
+ *                        Cristina E. Vintila
  *
  * Wireshark - Network traffic analyzer
  * By Gerald Combs <gerald@wireshark.org>
@@ -576,9 +577,9 @@ dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, catt
 
         buf = wmem_strbuf_new(wmem_packet_scope(), "");
 
-	/* Optional code. Checks whether identification field may be an ICCID.
-	 * It has to be considered to move this logic to another layer / dissector.
-	 * However it is common to send ICCID as Identification for OTA download. */
+        /* Optional code. Checks whether identification field may be an ICCID.
+         * It has to be considered to move this logic to another layer / dissector.
+         * However it is common to send ICCID as Identification for OTA download. */
         if ((pck->pdu.syn.idlen <= 10 || pck->pdu.syn.idlen >= 9) && ICCID_PREFIX == pck->pdu.syn.id[0]) {
             /* switch nibbles */
             for (i = 0; i < pck->pdu.syn.idlen; i++) {
@@ -598,9 +599,9 @@ dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, catt
                 wmem_strbuf_append_printf(buf,"%02X",pck->pdu.syn.id[i]);
             }
 
-	    if (i >= CATTP_MAX_IDLEN_DISPLAY) {
+            if (i >= CATTP_MAX_IDLEN_DISPLAY) {
                 wmem_strbuf_append_printf(buf,"... [%u bytes more]", pck->pdu.syn.idlen - i);
-	    }
+            }
 
             proto_tree_add_bytes_format_value(id_tree, hf_cattp_identification, tvb, offset, pck->pdu.syn.idlen,
                                               pck->pdu.syn.id, "%s", wmem_strbuf_get_str(buf));
@@ -665,10 +666,10 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 
     col_append_fstr(pinfo->cinfo,COL_INFO,"Flags=0x%02X Ack=%u Seq=%u WSize=%u ",pck->flags,pck->ackno, pck->seqno, pck->wsize);
     if (pck->dlen > 0)
-    	col_append_fstr(pinfo->cinfo,COL_INFO,"DataLen=%u ",pck->dlen);
+        col_append_fstr(pinfo->cinfo,COL_INFO,"DataLen=%u ",pck->dlen);
 
     if (pck->flags & F_EAK)
-    	col_append_fstr(pinfo->cinfo,COL_INFO,"EAKs=%u ",pck->pdu.ack.eak_len);
+        col_append_fstr(pinfo->cinfo,COL_INFO,"EAKs=%u ",pck->pdu.ack.eak_len);
 
     if (tree) { /* we are being asked for details */
         proto_item *ti, *cattp_tree;
@@ -713,36 +714,34 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
                                          pck->wsize,"%u", pck->wsize);
         offset += 2;
 
-gushort computed_chksum;
-vec_t cksum_vec[1];
-int header_offset = 0;
-guint cksum_data_len;
-cksum_data_len = pck->hlen + pck->dlen;
+        gushort computed_chksum;
+        vec_t cksum_vec[1];
+        int header_offset = 0;
+        guint cksum_data_len;
+        cksum_data_len = pck->hlen + pck->dlen;
         if (!cattp_check_checksum) {
-          /* We have turned checksum checking off; we do NOT checksum it. */
-          proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
-                                   pck->chksum,"0x%X [validation disabled]", pck->chksum);
-            }
-        else {
+            /* We have turned checksum checking off; we do NOT checksum it. */
+            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
+                                             pck->chksum,"0x%X [validation disabled]", pck->chksum);
+        } else {
             /* We haven't turned checksum checking off; checksum it. */
 
             /* Unlike TCP, CATTP does not make use of a pseudo-header for checksum */
             SET_CKSUM_VEC_TVB(cksum_vec[0], tvb, header_offset, cksum_data_len);
             computed_chksum = in_cksum(cksum_vec, 1);
 
-	   if (computed_chksum == 0) {
-                /* Checksum is valid */ 
-                   proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
-                                               pck->chksum,"0x%X [validated]", pck->chksum);
-                }
-              else {
-                 /* Checksum is invalid. Let's compute the expected checksum, based on the data we have */
-		gushort expected_cksum;
-		expected_cksum = expected_chksum(pck->chksum, computed_chksum);
- 		proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,
-			"0x%X [incorrect, correct: 0x%X]", pck->chksum, expected_cksum);
-                 }
-	} /* End of checksum code */
+            if (computed_chksum == 0) {
+                /* Checksum is valid */
+                proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
+                                                 pck->chksum,"0x%X [validated]", pck->chksum);
+            } else {
+                /* Checksum is invalid. Let's compute the expected checksum, based on the data we have */
+                gushort expected_cksum;
+                expected_cksum = expected_chksum(pck->chksum, computed_chksum);
+                proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, pck->chksum,
+                                                 "0x%X [incorrect, correct: 0x%X]", pck->chksum, expected_cksum);
+            }
+        } /* End of checksum code */
 
         offset += 2;
 
@@ -756,25 +755,26 @@ cksum_data_len = pck->hlen + pck->dlen;
             offset++;
         } /* for other PDU types nothing special to be displayed in detail tree. */
 
-	/*TODO: check whether to call heuristic dissectors .*/
-	if (pck->dlen > 0) { /* Call generic data handle if data exists. */
-		guint32 len,reported_len;
-		len = tvb_captured_length_remaining(tvb, offset);
-  		reported_len = tvb_reported_length_remaining(tvb, offset);
-		tvb = tvb_new_subset(tvb, offset, len, reported_len);
-		call_dissector(data_handle,tvb, pinfo, tree);
-	}
+        /*TODO: check whether to call heuristic dissectors .*/
+        if (pck->dlen > 0) { /* Call generic data handle if data exists. */
+            guint32 len,reported_len;
+            len = tvb_captured_length_remaining(tvb, offset);
+            reported_len = tvb_reported_length_remaining(tvb, offset);
+            tvb = tvb_new_subset(tvb, offset, len, reported_len);
+            call_dissector(data_handle,tvb, pinfo, tree);
+        }
     }
 }
 
-static gushort expected_chksum(gushort packet_chksum, gushort computed_chksum)
+static gushort 
+expected_chksum(gushort packet_chksum, gushort computed_chksum)
 {
-gushort expected_sum;
-expected_sum = packet_chksum;
-expected_sum += g_ntohs(computed_chksum);
-expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
-expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
-return expected_sum;
+    gushort expected_sum;
+    expected_sum = packet_chksum;
+    expected_sum += g_ntohs(computed_chksum);
+    expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
+    expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
+    return expected_sum;
 }
 
 /*
