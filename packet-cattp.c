@@ -30,8 +30,6 @@
 #include <epan/decode_as.h>
 #include <epan/in_cksum.h>
 #include <string.h>
-
-//may not be needed
 #include <glib.h>
 #include <epan/tvbuff.h>
 
@@ -625,15 +623,16 @@ dissect_cattp_eakpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, catt
         eak_tree = proto_item_add_subtree(eaki,ett_cattp_eaks);
 
         for (i = 0; i < pck->pdu.ack.eak_len && i < CATTP_MAX_EAK_DISPLAY; i++) {
-            proto_tree_add_uint_format_value(eak_tree, hf_cattp_eaks, tvb, offset, 2,
+	    if (i == (CATTP_MAX_EAK_DISPLAY - 1) && pck->pdu.ack.eak_len > CATTP_MAX_EAK_DISPLAY) {
+               proto_tree_add_uint_format_value(eak_tree, hf_cattp_eaks, tvb, offset, pck->hlen - offset,
+                                             pck->pdu.ack.eaks[i], "%u [ %u remaining EAK, max display count of %u reached ]",
+					     pck->pdu.ack.eaks[i], pck->pdu.ack.eak_len - (i+1),CATTP_MAX_EAK_DISPLAY);
+                offset = pck->hlen;
+	    } else {
+                proto_tree_add_uint_format_value(eak_tree, hf_cattp_eaks, tvb, offset, 2,
                                              pck->pdu.ack.eaks[i], "%u", pck->pdu.ack.eaks[i]);
-            offset += 2;
-        }
-
-        if (i >= CATTP_MAX_EAK_DISPLAY) {
-            proto_tree_add_text(eak_tree, tvb, offset, pck->hlen - offset,
-                                "[ %u remaining EAKS, max display count of %u reached ]",
-                                pck->pdu.ack.eak_len - i,CATTP_MAX_EAK_DISPLAY);
+                offset += 2;
+	    }
         }
     }
     return offset;
