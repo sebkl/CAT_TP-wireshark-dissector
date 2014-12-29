@@ -1,8 +1,8 @@
 /* packet-cattp.c
  * Routines for packet dissection of
  *      ETSI TS 102 127 v6.13.0  (Release 6 / 2009-0r45)
- * Copyright 2014-2014 by Sebastian Kloeppel <sebastian@kloeppel.mobi>
- *                        Cristina E. Vintila
+ * Copyright 2014-2014 by Sebastian Kloeppel <sebastian [at] kloeppel.mobi>
+ *                        Cristina E. Vintila <christina.vintila [at] gmail.com>
  *
  * Wireshark - Network traffic analyzer
  * By Gerald Combs <gerald@wireshark.org>
@@ -89,12 +89,6 @@ typedef struct {
     } pdu;
 } cattp_pck;
 
-/* Function to register the dissector, called by plugin infrastructure. */
-void proto_register_cattp();
-
-/* Handoff */
-void proto_reg_handoff_cattp();
-
 /* Dissection of the base header */
 static void dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree);
 
@@ -147,15 +141,10 @@ static int hf_cattp_rc = -1;
 static int hf_cattp_eaklen = -1;
 static int hf_cattp_eaks = -1;
 
-
 static dissector_handle_t data_handle;
-
-/* Place CATTP summary in proto tree */
-static gboolean cattp_summary_in_tree = TRUE;
 
 /* Flag to control whether to check the CATTP checksum */
 static gboolean cattp_check_checksum = TRUE;
-
 
 static const char* cattp_reset_reason_code(guint8 idx)
 {
@@ -179,15 +168,10 @@ static const char* cattp_reset_reason_code(guint8 idx)
     }
 }
 
+/* Function to register the dissector, called by plugin infrastructure. */
 void
 proto_register_cattp(void)
 {
-    proto_cattp = proto_register_protocol (
-                      "ETSI Card Application Toolkit Transport Protocol",	/* name */
-                      "CAT-TP (ETSI)",/* short name */
-                      "cattp"		/* abbrev */
-                  );
-
     static hf_register_info hf[] = {
         {
             &hf_cattp_flags,
@@ -353,10 +337,17 @@ proto_register_cattp(void)
         &ett_cattp_eaks
     };
 
+    proto_cattp = proto_register_protocol (
+                      "ETSI Card Application Toolkit Transport Protocol",	/* name */
+                      "CAT-TP (ETSI)",/* short name */
+                      "cattp"		/* abbrev */
+                  );
+
     proto_register_field_array(proto_cattp, hf, array_length(hf));
     proto_register_subtree_array(ett, array_length(ett));
 }
 
+/* Handoff */
 void
 proto_reg_handoff_cattp(void)
 {
@@ -374,10 +365,13 @@ static cattp_pck*
 parse_cattp_packet(tvbuff_t *tvb)
 {
     cattp_pck* ret;
-    ret = wmem_alloc(wmem_packet_scope(),sizeof(cattp_pck));
+    gulong len;
+    int offset;
+    guint8 fb;
+
+    ret = (cattp_pck*) wmem_alloc(wmem_packet_scope(),sizeof(cattp_pck));
 
     /* Check if the standard header fits in. */
-    gulong len;
     len = tvb_captured_length(tvb);
     if (len < CATTP_HBLEN) {
         /* this is not a valid CATTP packet */
@@ -385,9 +379,7 @@ parse_cattp_packet(tvbuff_t *tvb)
     }
 
     /* Parse the header. */
-    int offset;
     offset = 0;
-    guint8 fb;
     fb = tvb_get_guint8(tvb,offset);
     offset++;
 
@@ -429,12 +421,14 @@ parse_cattp_packet(tvbuff_t *tvb)
 
     /* Parse SYN (only syn flag set) */
     if ((ret->flags & M_PDU_SYN) == F_SYN) {
+        int idlen,i;
+        guint8* id;
+
         ret->pdu.syn.maxpdu = tvb_get_ntohs(tvb,offset);
         offset+=2;
         ret->pdu.syn.maxsdu = tvb_get_ntohs(tvb,offset);
         offset+=2;
 
-        int idlen;
         idlen = ret->pdu.syn.idlen = tvb_get_guint8(tvb,offset);
         offset++;
 
@@ -442,10 +436,8 @@ parse_cattp_packet(tvbuff_t *tvb)
             return NULL;
         }
 
-        guint8* id;
-        id = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * idlen + 1);
+        id = (guint8*) wmem_alloc(wmem_packet_scope(),sizeof(guint8) * idlen + 1);
 
-        int i;
         for (i = 0; i <idlen; i++) {
             id[i] = tvb_get_guint8(tvb,offset);
             offset++;
@@ -458,11 +450,10 @@ parse_cattp_packet(tvbuff_t *tvb)
     /* Parse ACK PDU */
     if ((ret->flags & M_PDU_ACK) == F_ACK) {
         if (ret->flags & F_EAK) {
-            int eak_len;
+            int eak_len,i;
             eak_len = ret->pdu.ack.eak_len = (len-CATTP_HBLEN) >> 1;
-            ret->pdu.ack.eaks = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * eak_len +1);
+            ret->pdu.ack.eaks = (gushort*) wmem_alloc(wmem_packet_scope(),sizeof(guint8) * eak_len +1);
 
-            int i;
             for (i = 0; i < eak_len; i++) {
                 ret->pdu.ack.eaks[i] = tvb_get_ntohs(tvb,offset);
                 offset+=2;
@@ -479,9 +470,10 @@ parse_cattp_packet(tvbuff_t *tvb)
 
         if (ret->dlen > 0) {
             guint8* data;
-            data = wmem_alloc(wmem_packet_scope(),sizeof(guint8) * ret->dlen + 1);
-
             int i;
+
+            data = (guint8*) wmem_alloc(wmem_packet_scope(),sizeof(guint8) * ret->dlen + 1);
+
             for (i = 0; i < ret->dlen; i++) {
                 data[i] = tvb_get_guint8(tvb,offset);
                 offset++;
@@ -501,9 +493,12 @@ parse_cattp_packet(tvbuff_t *tvb)
 }
 
 static gboolean
-dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void *data)
+dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data)
 {
-    cattp_pck* pck = parse_cattp_packet(tvb);
+    cattp_pck* pck;
+    (void) data;
+
+    pck = parse_cattp_packet(tvb);
 
     if (pck == NULL) {
         return FALSE;
@@ -578,7 +573,7 @@ dissect_cattp_synpdu(tvbuff_t *tvb, proto_tree *cattp_tree, guint32 offset, catt
         /* Optional code. Checks whether identification field may be an ICCID.
          * It has to be considered to move this logic to another layer / dissector.
          * However it is common to send ICCID as Identification for OTA download. */
-        if ((pck->pdu.syn.idlen <= 10 || pck->pdu.syn.idlen >= 9) && ICCID_PREFIX == pck->pdu.syn.id[0]) {
+        if (pck->pdu.syn.idlen <= 10 && pck->pdu.syn.idlen >= 9 && ICCID_PREFIX == pck->pdu.syn.id[0]) {
             /* switch nibbles */
             for (i = 0; i < pck->pdu.syn.idlen; i++) {
                 guint8 c, n;
@@ -673,6 +668,10 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
     if (tree) { /* we are being asked for details */
         proto_item *ti, *cattp_tree;
         guint32 offset;
+        gushort computed_chksum;
+        vec_t cksum_vec[1];
+        int header_offset;
+        guint cksum_data_len;
 
         ti = proto_tree_add_protocol_format(tree, proto_cattp, tvb, 0, pck->hlen,
                                             "Card Application Toolkit Transport Protocol v%u, Src Port: %u, Dst Port: %u)",
@@ -713,10 +712,7 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
                                          pck->wsize,"%u", pck->wsize);
         offset += 2;
 
-        gushort computed_chksum;
-        vec_t cksum_vec[1];
-        int header_offset = 0;
-        guint cksum_data_len;
+        header_offset = 0;
         cksum_data_len = pck->hlen + pck->dlen;
         if (!cattp_check_checksum) {
             /* We have turned checksum checking off; we do NOT checksum it. */
