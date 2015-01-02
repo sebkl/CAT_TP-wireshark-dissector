@@ -108,7 +108,8 @@ static const value_string cattp_reset_reason[] = {
     { 4, "Unexpected PDU received" },
     { 5, "Maximum retries exceeded" },
     { 6, "Version not supported" },
-    { 7, "RFU" }
+    { 7, "RFU" },
+    { 0, NULL }
 };
 
 /* Dissection of SYN PDUs */
@@ -117,15 +118,18 @@ dissect_cattp_synpdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *cattp_tree, 
 {
     proto_item *idi, *id_tree;
     guint8 idlen;
+    guint16 maxpdu, maxsdu;
 
-    proto_tree_add_uint(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, ENC_BIG_ENDIAN);
+    maxpdu = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, maxpdu);
     offset += 2;
 
-    proto_tree_add_uint(cattp_tree, hf_cattp_maxsdu, tvb, offset,2, ENC_BIG_ENDIAN);
+    maxsdu = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_maxsdu, tvb, offset,2, maxsdu);
     offset += 2;
 
     idlen = tvb_get_guint8(tvb,offset);
-    idi = proto_tree_add_uint(cattp_tree, hf_cattp_idlen, tvb, offset, 1, ENC_BIG_ENDIAN);
+    idi = proto_tree_add_uint(cattp_tree, hf_cattp_idlen, tvb, offset, 1, idlen);
     offset++;
 
     col_append_fstr(pinfo->cinfo,COL_INFO," IdLen=%u ",idlen);
@@ -342,7 +346,6 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 
         if (flags & F_SYN)
             offset = dissect_cattp_synpdu(tvb,pinfo,cattp_tree,offset);
-        //TODO: check if now offset equals hlen ? Else -> expert info.
         else if (flags & F_EAK)
             offset = dissect_cattp_eakpdu(tvb, pinfo, cattp_tree, offset, hlen);
         else if (flags & F_RST) 
