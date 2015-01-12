@@ -1,8 +1,10 @@
 /* packet-cattp.c
  * Routines for packet dissection of
  *      ETSI TS 102 127 v6.13.0  (Release 6 / 2009-0r45)
- * Copyright 2014-2014 by Sebastian Kloeppel <sebastian [at] kloeppel.mobi>
- *                        Cristina E. Vintila <christina.vintila [at] gmail.com>
+ *      Card Application Toolkit - Transport Protocol over UDP
+ *
+ * Copyright 2014-2014 by Sebastian Kloeppel <sk [at] nakedape.net>
+ *                        Cristina E. Vintila <cristina.vintila [at] gmail.com>
  *
  * Wireshark - Network traffic analyzer
  * By Gerald Combs <gerald@wireshark.org>
@@ -24,10 +26,14 @@
  */
 #include "config.h"
 
+#include <epan/prefs.h>
 #include <epan/packet.h>
 #include <epan/in_cksum.h>
 
+#define CATTP_SHORTNAME "CAT-TP"
 #define CATTP_HBLEN 18
+#define CATTP_MAX_EAK_DISPLAY 10 /* theoretically possible to have more than 10 EAKs */
+
 #define F_SYN 0x80
 #define F_ACK 0x40
 #define F_EAK 0x20
@@ -44,10 +50,9 @@
 
 #define ICCID_PREFIX 0x98
 
-#define CATTP_MAX_EAK_DISPLAY 10 /* theoretically possible to have more than 10 EAKs */
-
 static int proto_cattp = -1;
-static guint gcattp_port = 0;
+
+static dissector_handle_t cattp_handle;
 
 static gint ett_cattp = -1;
 static gint ett_cattp_id = -1;
@@ -96,8 +101,11 @@ static int hf_cattp_eaks = -1;
 
 static dissector_handle_t data_handle;
 
-/* Flag to control whether to check the CATTP checksum */
+/* Preference to control whether to check the CATTP checksum */
 static gboolean cattp_check_checksum = TRUE;
+
+/* Preference to control whether to heuristically detect CATTP packets */
+static gboolean cattp_enable_heuristic_dissection = TRUE;
 
 /* Reason code mapping */
 static const value_string cattp_reset_reason[] = {
@@ -112,20 +120,20 @@ static const value_string cattp_reset_reason[] = {
     { 0, NULL }
 };
 
+/* Forward declartion due to use of heuristic dissection preference. */
+void proto_reg_handoff_cattp(void);
+
 /* Dissection of SYN PDUs */
 static guint32
 dissect_cattp_synpdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *cattp_tree, guint32 offset)
 {
     proto_item *idi, *id_tree;
     guint8 idlen;
-    guint16 maxpdu, maxsdu;
 
-    maxpdu = tvb_get_ntohs(tvb,offset);
-    proto_tree_add_uint(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, maxpdu);
+    proto_tree_add_item(cattp_tree, hf_cattp_maxpdu, tvb, offset, 2, ENC_BIG_ENDIAN);
     offset += 2;
 
-    maxsdu = tvb_get_ntohs(tvb,offset);
-    proto_tree_add_uint(cattp_tree, hf_cattp_maxsdu, tvb, offset,2, maxsdu);
+    proto_tree_add_item(cattp_tree, hf_cattp_maxsdu, tvb, offset, 2, ENC_BIG_ENDIAN);
     offset += 2;
 
     idlen = tvb_get_guint8(tvb,offset);
@@ -155,7 +163,7 @@ dissect_cattp_synpdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *cattp_tree, 
             for (i = 0; i < idlen; i++) {
                 guint8 c, n;
 
-                c = tvb_get_guint8(tvb,i);
+                c = tvb_get_guint8(tvb,offset + i);
                 n = ((c & 0xF0) >> 4) + ((c & 0x0F) << 4);
                 wmem_strbuf_append_printf(buf,"%02X",n);
             }
@@ -209,155 +217,140 @@ dissect_cattp_eakpdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *cattp_tree, 
 static guint32
 dissect_cattp_rstpdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *cattp_tree, guint32 offset)
 {
-    proto_item *rst;
     guint8 rc;
     const gchar* rc_str;
 
     rc = tvb_get_guint8(tvb, offset); /* reason code of RST */
     rc_str = val_to_str(rc,cattp_reset_reason,"Unknown reason code: 0x%02x");
     col_append_fstr(pinfo->cinfo,COL_INFO," Reason=\"%s\" ", rc_str);
-    rst = proto_tree_add_item(cattp_tree, hf_cattp_rc, tvb, offset, 1, ENC_BIG_ENDIAN);
-    proto_item_append_text(rst, " ('%s')", rc_str);
-    return ++offset;
-}
 
-/* Verify if received checksum is correct. */
-static gushort
-expected_chksum(gushort packet_chksum, gushort computed_chksum)
-{
-    gushort expected_sum;
-    expected_sum = packet_chksum;
-    expected_sum += g_ntohs(computed_chksum);
-    expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
-    expected_sum = (expected_sum & 0xFFFF) + (expected_sum >> 16);
-    return expected_sum;
+    proto_tree_add_item(cattp_tree, hf_cattp_rc, tvb, offset, 1, ENC_BIG_ENDIAN);
+    return ++offset;
 }
 
 /* Dissection of the base header */
 static void
 dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 {
-    col_set_str(pinfo->cinfo, COL_PROTOCOL, "UDP CAT-TP");
+    const char* pdutype = "[Unknown PDU]";
+    proto_item *ti, *cattp_tree;
+    guint32 offset;
+    gushort computed_chksum;
+    vec_t cksum_vec[1];
+    int header_offset;
+    guint cksum_data_len;
+    guint8 flags, first_byte, hlen, ver;
+    guint16 plen, chksum, ackno, seqno, wsize, sport, dport;
+    col_set_str(pinfo->cinfo, COL_PROTOCOL, CATTP_SHORTNAME);
 
     /* Clear out stuff in the info column */
     col_clear(pinfo->cinfo,COL_INFO);
 
-    if (tree) { /* we are being asked for details */
-        const char* pdutype = "[Unknown PDU]";
-        proto_item *ti, *cattp_tree;
-        guint32 offset;
-        gushort computed_chksum;
-        vec_t cksum_vec[1];
-        int header_offset;
-        guint cksum_data_len;
-        guint8 flags, first_byte, hlen, ver;
-        guint16 plen, chksum, ackno, seqno, wsize, sport, dport;
+    /* TODO: check whether to return or not ... */
+    /* if (!tree) return; */
 
-        hlen = tvb_get_guint8(tvb,3); /* lookahead header len. */
+    hlen = tvb_get_guint8(tvb,3); /* lookahead header len. */
 
-        offset = 0;
-        ti = proto_tree_add_protocol_format(tree, proto_cattp, tvb, offset, hlen,
-                                            "Card Application Toolkit Transport Protocol");
+    offset = 0;
+    ti = proto_tree_add_protocol_format(tree, proto_cattp, tvb, offset, hlen,
+                                        "Card Application Toolkit Transport Protocol");
 
-        cattp_tree = proto_item_add_subtree(ti, ett_cattp);
+    cattp_tree = proto_item_add_subtree(ti, ett_cattp);
 
-        /* render flags tree */
-        first_byte = tvb_get_guint8(tvb,offset);
-        flags = first_byte & M_FLAGS; /* discard version from first byte for flags*/
-        ver = first_byte & M_VERSION; /* discard flags for version */
-        proto_tree_add_bitmask(cattp_tree, tvb, offset, hf_cattp_flags ,ett_cattp_flags, cattp_flags, ENC_BIG_ENDIAN);
-        /*proto_tree_add_uint(cattp_tree, hf_cattp_version, tvb,offset, 1, ENC_BIG_ENDIAN);*/
-        offset += 3; /* skip RFU and header len */
+    /* render flags tree */
+    first_byte = tvb_get_guint8(tvb,offset);
+    flags = first_byte & M_FLAGS; /* discard version from first byte for flags*/
+    ver = first_byte & M_VERSION; /* discard flags for version */
+    proto_tree_add_bitmask(cattp_tree, tvb, offset, hf_cattp_flags ,ett_cattp_flags, cattp_flags, ENC_BIG_ENDIAN);
+    /*proto_tree_add_uint(cattp_tree, hf_cattp_version, tvb,offset, 1, ENC_BIG_ENDIAN);*/
+    offset += 3; /* skip RFU and header len */
 
-        /* Header length, varies for SYN(identification) and EAKs */
-        proto_tree_add_uint(cattp_tree, hf_cattp_hlen, tvb, offset, 1, hlen);
-        offset += 1;
+    /* Header length, varies for SYN(identification) and EAKs */
+    proto_tree_add_uint(cattp_tree, hf_cattp_hlen, tvb, offset, 1, hlen);
+    offset += 1;
 
-        /* Parse cattp source port. */
-        sport = tvb_get_ntohs(tvb,offset);
-        proto_tree_add_uint(cattp_tree, hf_cattp_srcport, tvb, offset, 2, sport);
-        offset += 2;
+    /* Parse cattp source port. */
+    sport = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_srcport, tvb, offset, 2, sport);
+    offset += 2;
 
-            /* Parse cattp destination port. */
-        dport = tvb_get_ntohs(tvb,offset);
-        proto_tree_add_uint(cattp_tree, hf_cattp_dstport, tvb, offset, 2, dport);
-        offset += 2;
+        /* Parse cattp destination port. */
+    dport = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_dstport, tvb, offset, 2, dport);
+    offset += 2;
 
-        proto_item_append_text(ti, " (v%u, Src Port: %u, Dst Port: %u)", ver, sport, dport);
-        col_add_fstr(pinfo->cinfo, COL_INFO, "%u > %u ", sport, dport);
+    proto_item_append_text(ti, " (v%u, Src Port: %u, Dst Port: %u)", ver, sport, dport);
+    col_add_fstr(pinfo->cinfo, COL_INFO, "%u > %u ", sport, dport);
 
-            /* Parse length of payload. */
-        plen = tvb_get_ntohs(tvb,offset);
-        proto_tree_add_uint(cattp_tree, hf_cattp_datalen, tvb, offset, 2, plen);
-        offset += 2;
+        /* Parse length of payload. */
+    plen = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_datalen, tvb, offset, 2, plen);
+    offset += 2;
 
-            /* Parse sequence number. */
-        seqno = tvb_get_ntohs(tvb,offset);
-        proto_tree_add_uint(cattp_tree, hf_cattp_seq, tvb, offset, 2, seqno);
-        offset += 2;
+        /* Parse sequence number. */
+    seqno = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_seq, tvb, offset, 2, seqno);
+    offset += 2;
 
-            /* Parse acknowledgement number. */
-        ackno = tvb_get_ntohs(tvb,offset);
-        proto_tree_add_uint(cattp_tree, hf_cattp_ack, tvb, offset, 2, ackno);
-        offset += 2;
+        /* Parse acknowledgement number. */
+    ackno = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_ack, tvb, offset, 2, ackno);
+    offset += 2;
 
-            /* Parse window size. */
-        wsize = tvb_get_ntohs(tvb,offset);
-        proto_tree_add_uint(cattp_tree, hf_cattp_windowsize, tvb, offset, 2, wsize);
-        offset += 2;
+        /* Parse window size. */
+    wsize = tvb_get_ntohs(tvb,offset);
+    proto_tree_add_uint(cattp_tree, hf_cattp_windowsize, tvb, offset, 2, wsize);
+    offset += 2;
 
-        if (flags & F_SYN)
-               pdutype = "[SYN PDU]";
-        else if (flags & F_ACK) 
-               pdutype = "[ACK PDU]";
-        else if (flags & F_RST)
-               pdutype = "[RST PDU]";
+    if (flags & F_SYN)
+           pdutype = "[SYN PDU]";
+    else if (flags & F_ACK)
+           pdutype = "[ACK PDU]";
+    else if (flags & F_RST)
+           pdutype = "[RST PDU]";
 
-        col_append_fstr(pinfo->cinfo,COL_INFO,"%s Flags=0x%02X Ack=%u Seq=%u WSize=%u",pdutype,flags,ackno,seqno,wsize);
+    col_append_fstr(pinfo->cinfo,COL_INFO,"%s Flags=0x%02X Ack=%u Seq=%u WSize=%u",pdutype,flags,ackno,seqno,wsize);
 
-        /* Parse and verify checksum */
-        header_offset = 0;
-        cksum_data_len = hlen + plen;
-        chksum = tvb_get_ntohs(tvb,offset);
-        if (!cattp_check_checksum) {
-            /* We have turned checksum checking off; we do NOT checksum it. */
+    /* Parse and verify checksum */
+    header_offset = 0;
+    cksum_data_len = hlen + plen;
+    chksum = tvb_get_ntohs(tvb,offset);
+    if (!cattp_check_checksum) {
+        /* We have turned checksum checking off; we do NOT checksum it. */
+        proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
+                                         chksum,"0x%X [validation disabled]", chksum);
+    } else {
+        /* We haven't turned checksum checking off; checksum it. */
+
+        /* Unlike TCP, CATTP does not make use of a pseudo-header for checksum */
+        SET_CKSUM_VEC_TVB(cksum_vec[0], tvb, header_offset, cksum_data_len);
+        computed_chksum = in_cksum(cksum_vec, 1);
+
+        if (computed_chksum == 0) {
+            /* Checksum is valid */
             proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
-                                             chksum,"0x%X [validation disabled]", chksum);
+                                             chksum,"0x%X [validated]", chksum);
         } else {
-            /* We haven't turned checksum checking off; checksum it. */
-
-            /* Unlike TCP, CATTP does not make use of a pseudo-header for checksum */
-            SET_CKSUM_VEC_TVB(cksum_vec[0], tvb, header_offset, cksum_data_len);
-            computed_chksum = in_cksum(cksum_vec, 1);
-
-            if (computed_chksum == 0) {
-                /* Checksum is valid */
-                proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2,
-                                                 chksum,"0x%X [validated]", chksum);
-            } else {
-                /* Checksum is invalid. Let's compute the expected checksum, based on the data we have */
-                gushort expected_cksum;
-                expected_cksum = expected_chksum(chksum, computed_chksum);
-                proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, chksum,
-                                                 "0x%X [incorrect, correct: 0x%X]", chksum, expected_cksum);
-            }
-        } /* End of checksum code */
-        offset += 2;
-
-        if (flags & F_SYN)
-            offset = dissect_cattp_synpdu(tvb,pinfo,cattp_tree,offset);
-        else if (flags & F_EAK)
-            offset = dissect_cattp_eakpdu(tvb, pinfo, cattp_tree, offset, hlen);
-        else if (flags & F_RST) 
-            offset = dissect_cattp_rstpdu(tvb, pinfo, cattp_tree, offset);
-            /* for other PDU types nothing special to be displayed in detail tree. */
-
-        /*TODO: check whether to call heuristic dissectors .*/
-        if (plen > 0) { /* Call generic data handle if data exists. */
-           col_append_fstr(pinfo->cinfo,COL_INFO," DataLen=%u",plen);
-           tvb = tvb_new_subset_remaining(tvb, offset);
-           call_dissector(data_handle,tvb, pinfo, tree);
+            /* Checksum is invalid. Let's compute the expected checksum, based on the data we have */
+            proto_tree_add_uint_format_value(cattp_tree, hf_cattp_checksum, tvb, offset, 2, chksum,
+                                             "0x%X [incorrect, correct: 0x%X]", chksum,
+                                             in_cksum_shouldbe(chksum,computed_chksum));
         }
+    } /* End of checksum code */
+    offset += 2;
+
+    if (flags & F_SYN)
+        offset = dissect_cattp_synpdu(tvb,pinfo,cattp_tree,offset);
+    else if (flags & F_EAK)
+        offset = dissect_cattp_eakpdu(tvb, pinfo, cattp_tree, offset, hlen);
+    else if (flags & F_RST)
+        offset = dissect_cattp_rstpdu(tvb, pinfo, cattp_tree, offset);
+        /* for other PDU types nothing special to be displayed in detail tree. */
+
+    if (plen > 0) { /* Call generic data handle if data exists. */
+       col_append_fstr(pinfo->cinfo,COL_INFO," DataLen=%u",plen);
+       tvb = tvb_new_subset_remaining(tvb, offset);
+       call_dissector(data_handle,tvb, pinfo, tree);
     }
 }
 
@@ -365,10 +358,11 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 static gboolean
 dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_)
 {
-    guint32 len;
+    guint32 len,clen;
 
     len = tvb_reported_length(tvb);
-    if (len >= CATTP_HBLEN) { /* check of data is big enough for base header. */
+    clen = tvb_captured_length(tvb);
+    if (len >= CATTP_HBLEN && clen >= CATTP_HBLEN) { /* check of data is big enough for base header. */
         guint8 flags, hlen;
         guint16 plen;
 
@@ -516,7 +510,7 @@ proto_register_cattp(void)
         {
             &hf_cattp_iccid,
             {
-                "ICCID","cattp.iccid", FT_BYTES, BASE_NONE, NULL, 0x0,
+                "ICCID","cattp.iccid", FT_STRING, BASE_NONE, NULL, 0x0,
                 NULL, HFILL
             }
         },
@@ -537,7 +531,7 @@ proto_register_cattp(void)
         {
             &hf_cattp_rc,
             {
-                "Reason Code","cattp.rc", FT_UINT8, BASE_DEC, NULL, 0x0,
+                "Reason Code","cattp.rc", FT_UINT8, BASE_DEC, VALS(cattp_reset_reason), 0x0,
                 NULL, HFILL
             }
         },
@@ -572,28 +566,49 @@ proto_register_cattp(void)
         &ett_cattp_eaks
     };
 
+    module_t *cattp_module;
+
     proto_cattp = proto_register_protocol (
                       "ETSI Card Application Toolkit Transport Protocol",    /* name */
-                      "CAT-TP (ETSI)",/* short name */
-                      "cattp"        /* abbrev */
+                      CATTP_SHORTNAME, /* short name */
+                      "cattp"         /* abbrev */
                   );
 
     proto_register_field_array(proto_cattp, hf, array_length(hf));
     proto_register_subtree_array(ett, array_length(ett));
+
+    cattp_module = prefs_register_protocol(proto_cattp, proto_reg_handoff_cattp);
+    prefs_register_bool_preference(cattp_module, "checksum",
+                                   "Validate checksum of all messages",
+                                   "Whether the checksum of all messages should be validated or not",
+                                   &cattp_check_checksum);
+
+    prefs_register_bool_preference(cattp_module, "enable",
+                                   "Enable " CATTP_SHORTNAME " heuristic dissection",
+                                   "Enable " CATTP_SHORTNAME " heuristic dissection (default is enabled)",
+                                   &cattp_enable_heuristic_dissection);
 }
 
 /* Handoff */
 void
 proto_reg_handoff_cattp(void)
 {
-    static dissector_handle_t cattp_handle;
+    static gboolean initialized = FALSE;
 
-    /* Create dissector handle */
-    cattp_handle = create_dissector_handle(dissect_cattp, proto_cattp);
-    data_handle = find_dissector("data");
+    if (!initialized) {
+        /* Create dissector handle */
+        cattp_handle = create_dissector_handle(dissect_cattp, proto_cattp);
 
-    dissector_add_uint("udp.port", gcattp_port, cattp_handle);
-    heur_dissector_add("udp",dissect_cattp_heur,proto_cattp);
+        /* find data handle */
+        data_handle = find_dissector("data");
+
+        heur_dissector_add("udp",dissect_cattp_heur,proto_cattp);
+        dissector_add_for_decode_as("udp.port", cattp_handle);
+        initialized = TRUE;
+    }
+
+    heur_dissector_set_enabled("udp",dissect_cattp_heur,proto_cattp,
+                               cattp_enable_heuristic_dissection);
 }
 
 /*
@@ -606,5 +621,5 @@ proto_reg_handoff_cattp(void)
  * End:
  *
  * vi: set shiftwidth=4 tabstop=4 expandtab:
- * :indentSize=4:tabSize=4:noTabs=false:
+ * :indentSize=4:tabSize=4:noTabs=true:
  */
