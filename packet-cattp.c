@@ -32,7 +32,6 @@
 
 #define CATTP_SHORTNAME "CAT-TP"
 #define CATTP_HBLEN 18
-#define CATTP_MAX_EAK_DISPLAY 10 /* theoretically possible to have more than 10 EAKs */
 
 #define F_SYN 0x80
 #define F_ACK 0x40
@@ -148,7 +147,7 @@ dissect_cattp_synpdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *cattp_tree, 
         guint8 first_id_byte;
 
         first_id_byte = tvb_get_guint8(tvb,offset);
-        proto_tree_add_item(id_tree, hf_cattp_identification, tvb, offset, idlen, ENC_BIG_ENDIAN);
+        proto_tree_add_item(id_tree, hf_cattp_identification, tvb, offset, idlen, ENC_NA);
 
         /* Optional code. Checks whether identification field may be an ICCID.
          * It has to be considered to move this logic to another layer / dissector.
@@ -194,19 +193,9 @@ dissect_cattp_eakpdu(tvbuff_t *tvb, packet_info *pinfo, proto_tree *cattp_tree, 
         col_append_fstr(pinfo->cinfo,COL_INFO," EAKs=%u",eak_count);
         eak_tree = proto_item_add_subtree(eaki,ett_cattp_eaks);
 
-        for (i = 0; i < eak_count && i < CATTP_MAX_EAK_DISPLAY; i++) {
-            guint16 eak;
-            eak = tvb_get_ntohs(tvb,offset);
-
-            if (i == (CATTP_MAX_EAK_DISPLAY - 1) && eak_count > CATTP_MAX_EAK_DISPLAY) {
-                proto_tree_add_uint_format_value(eak_tree, hf_cattp_eaks, tvb, offset, hlen - offset,
-                                                 eak, "%u [ %u remaining EAK, max display count of %u reached ]",
-                                                 eak, eak_count - (i+1),CATTP_MAX_EAK_DISPLAY);
-                offset = hlen;
-            } else {
-                proto_tree_add_uint(eak_tree, hf_cattp_eaks, tvb, offset, 2, eak);
-                offset += 2;
-            }
+        for (i = 0; i < eak_count; i++) {
+            proto_tree_add_item(eak_tree, hf_cattp_eaks, tvb, offset, 2, ENC_BIG_ENDIAN);
+            offset += 2;
         }
     }
 
@@ -246,9 +235,6 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
     /* Clear out stuff in the info column */
     col_clear(pinfo->cinfo,COL_INFO);
 
-    /* TODO: check whether to return or not ... */
-    /* if (!tree) return; */
-
     hlen = tvb_get_guint8(tvb,3); /* lookahead header len. */
 
     offset = 0;
@@ -262,7 +248,6 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
     flags = first_byte & M_FLAGS; /* discard version from first byte for flags*/
     ver = first_byte & M_VERSION; /* discard flags for version */
     proto_tree_add_bitmask(cattp_tree, tvb, offset, hf_cattp_flags ,ett_cattp_flags, cattp_flags, ENC_BIG_ENDIAN);
-    /*proto_tree_add_uint(cattp_tree, hf_cattp_version, tvb,offset, 1, ENC_BIG_ENDIAN);*/
     offset += 3; /* skip RFU and header len */
 
     /* Header length, varies for SYN(identification) and EAKs */
@@ -358,18 +343,14 @@ dissect_cattp(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 static gboolean
 dissect_cattp_heur(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree, void* data _U_)
 {
-    guint32 len,clen;
-
-    len = tvb_reported_length(tvb);
-    clen = tvb_captured_length(tvb);
-    if (len >= CATTP_HBLEN && clen >= CATTP_HBLEN) { /* check of data is big enough for base header. */
+    if (tvb_captured_length(tvb) >= CATTP_HBLEN) { /* check of data is big enough for base header. */
         guint8 flags, hlen;
         guint16 plen;
 
         hlen = tvb_get_guint8(tvb,3); /* header len */
         plen = tvb_get_ntohs(tvb,8); /* payload len */
 
-        if (hlen+plen != len) /* check if data length is ok. */
+        if (hlen+plen != tvb_reported_length(tvb)) /* check if data length is ok. */
             return FALSE;
 
         flags = tvb_get_guint8(tvb,0) & M_FLAGS;
